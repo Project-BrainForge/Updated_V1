@@ -37,7 +37,7 @@ from utils import utl_inv as inv
 
 ############# METHODS ############################
 linear_methods = ["MNE", "sLORETA"]  # , "eLORETA"]
-nn_methods = ["cnn_1d", "lstm", "deep_sif"]
+nn_methods = ["cnn_1d", "lstm", "deep_sif", "eeg_vit"]
 methods = linear_methods + nn_methods
 
 # device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -174,6 +174,8 @@ def _normalize_methods(method_list):
             normalized.append("deep_sif")
         elif ml in ("cnn1d", "cnn_1d", "1dcnn", "1d_cnn"):
             normalized.append("cnn_1d")
+        elif ml in ("vit", "eegvit", "eeg_vit", "transformer"):
+            normalized.append("eeg_vit")
         else:
             normalized.append(m)
     return normalized
@@ -206,6 +208,15 @@ def _pick_model_path_from_run_dir(run_dir: str, method: str) -> str:
             os.path.join(trained_models_dir, "DeepSIF_model.pt"),
             os.path.join(trained_models_dir, "deep_sif_model.pt"),
         ]
+    elif method == "eeg_vit":
+        candidates = [
+            os.path.join(trained_models_dir, "VIT_model.pt"),
+            os.path.join(trained_models_dir, "vit_model.pt"),
+            os.path.join(trained_models_dir, "EEGVIT_model.pt"),
+            os.path.join(trained_models_dir, "eegvit_model.pt"),
+            os.path.join(trained_models_dir, "eeg_vit_model.pt"),
+            os.path.join(trained_models_dir, "TRANSFORMER_model.pt"),
+        ]
 
     for p in candidates:
         if os.path.exists(p):
@@ -221,7 +232,7 @@ def _pick_model_path_from_run_dir(run_dir: str, method: str) -> str:
             return os.path.join(trained_models_dir, pt_files[0])
 
         # try a soft keyword match if multiple pt files exist
-        kw = {"cnn_1d": "cnn", "lstm": "lstm", "deep_sif": "sif"}.get(method, "")
+        kw = {"cnn_1d": "cnn", "lstm": "lstm", "deep_sif": "sif", "eeg_vit": "vit"}.get(method, "")
         if kw:
             for f in pt_files:
                 if kw in f.lower():
@@ -421,6 +432,7 @@ if args.net_from_file :
     cnn1d_params    = params_file["cnn1d"]
     lstm_params     = params_file["lstm"]
     deep_sif_params = params_file["deep_sif"]
+    vit_params      = params_file.get("eeg_vit", deep_sif_params)
 #if args.n_train_samples > 0 :
 #    cnn1d_params['n_train_samples'] = args.n_train_samples
 #    lstm_params['n_train_samples'] = args.n_train_samples
@@ -451,6 +463,7 @@ else :
     cnn1d_params = train_params
     lstm_params = train_params
     deep_sif_params = train_params
+    vit_params = train_params
 
 
 ##############################################################################################################################################
@@ -621,6 +634,58 @@ if "deep_sif" in methods:
     )
     deep_sif.eval()
 
+if "eeg_vit" in methods:
+    train_results_path = f"{results_path}/{train_dataset}"
+    if (vit_params["n_electrodes"] != n_electrodes) or (vit_params["n_sources"] != n_sources):
+        sys.exit(
+            (
+                "number of electrodes or sources in fwd does not match with number of electrodes or sources in eeg_vit model"
+                f"electrodes fwd : {n_electrodes} - electrodes eeg_vit : {vit_params['n_electrodes']}"
+                f"sources fwd : {n_sources} - sources eeg_vit : {vit_params['n_sources']}"
+            )
+        )
+
+    if args.train_run_dir:
+        vit_model_path = _pick_model_path_from_run_dir(args.train_run_dir, "eeg_vit")
+    else:
+        # fallback naming (similar pattern as others)
+        vit_model_name = (
+            f"simu_{args.train_simu_type}_"
+            f"srcspace_{head_model.source_space.src_sampling}"
+            f"_model_vit"
+            f"_trainset_{vit_params['n_train_samples']}"
+            f"_epochs_{vit_params['n_epochs']}"
+            f"_loss_{vit_params['loss']}"
+            f"_norm_{vit_params['norm']}.pt"
+        )
+        vit_model_path = f"{train_results_path}/trained_models/{vit_params['exp']}/{vit_model_name}"
+
+    if os.path.exists(vit_model_path):
+        print("EEGViT model is available for use")
+    else:
+        sys.exit(
+            f"EEGViT model is not accessible.\nTry other parameters or train your model first.\n{vit_model_path}"
+        )
+
+    from models.vit import EEGViTpl as vit_net
+
+    net_parameters = {
+        "num_sensor": vit_params["n_electrodes"],
+        "num_source": vit_params["n_sources"],
+        "n_times": vit_params.get("n_times", 500),
+        "embed_dim": vit_params.get("vit_embed_dim", 256),
+        "depth": vit_params.get("vit_depth", 6),
+        "num_heads": vit_params.get("vit_heads", 8),
+        "mlp_dim": vit_params.get("vit_mlp_dim", 512),
+        "dropout": vit_params.get("vit_dropout", 0.1),
+        "optimizer": None,
+        "lr": 1e-3,
+        "criterion": None,
+    }
+    eeg_vit = vit_net(**net_parameters)
+    eeg_vit.load_state_dict(torch.load(vit_model_path, map_location=torch.device("cpu")))
+    eeg_vit.eval()
+
 ##################################################################################################
 # to save metric values
 methods.append("gt")
@@ -770,6 +835,14 @@ for k in val_ds.indices:
                     torch.from_numpy(fwd),
                 )  # * esi_datamodule.train_scaler.maxs[k]
             else:  # amplitude rescale
+                j_hat = j_hat * val_ds.dataset.max_src[k]
+
+        elif method == "eeg_vit":
+            with torch.no_grad():
+                j_hat = eeg_vit(M.unsqueeze(0)).squeeze()
+            if vit_params.get("loss", args.train_loss) == "cosine":
+                j_hat = utl.gfp_scaling(M_unscaled, j_hat, torch.from_numpy(fwd))
+            else:
                 j_hat = j_hat * val_ds.dataset.max_src[k]
 
         else:

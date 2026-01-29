@@ -114,6 +114,11 @@ parser.add_argument(
     default=500,
     help="DeepSIF hidden size (called temporal_input_size in the original implementation)",
 )
+parser.add_argument("-vit_embed_dim", type=int, default=256, help="EEGViT embedding dimension")
+parser.add_argument("-vit_depth", type=int, default=6, help="EEGViT number of Transformer layers")
+parser.add_argument("-vit_heads", type=int, default=8, help="EEGViT number of attention heads")
+parser.add_argument("-vit_mlp_dim", type=int, default=512, help="EEGViT feedforward dimension")
+parser.add_argument("-vit_dropout", type=float, default=0.1, help="EEGViT dropout")
 parser.add_argument(
     "-leadfield_mat",
     type=str,
@@ -275,10 +280,12 @@ else:
     sys.exit("unknown simulation type (argument simu_type)")
 
 
-train_ds, val_ds = random_split(
-    ds_dataset,
-    [int(args.to_load * (1 - args.per_valid)), int(args.to_load * args.per_valid)],
-)
+effective_len = len(ds_dataset)
+if effective_len <= 0:
+    sys.exit("Dataset is empty (no samples found). Check your simulation folder and match JSON.")
+n_train = int(effective_len * (1 - args.per_valid))
+n_val = effective_len - n_train
+train_ds, val_ds = random_split(ds_dataset, [n_train, n_val])
 train_dataloader = DataLoader(dataset=train_ds, batch_size=args.bs, shuffle=True)
 val_dataloader = DataLoader(dataset=val_ds, batch_size=args.bs, shuffle=False)
 
@@ -341,6 +348,26 @@ elif args.model.upper() == "DEEPSIF":
         "num_sensor": n_electrodes,
         "num_source": n_sources,
         "temporal_input_size": args.deepsif_temporal_input_size,
+        "optimizer": torch.optim.Adam,
+        "lr": lr,
+        "criterion": crit,
+    }
+    model = net(**net_parameters)
+
+##------------------ EEGViT (Transformer) ----------------##
+elif args.model.upper() in ("VIT", "EEGVIT", "TRANSFORMER"):
+    from models.vit import EEGViTpl as net
+
+    lr = 1e-3
+    net_parameters = {
+        "num_sensor": n_electrodes,
+        "num_source": n_sources,
+        "n_times": args.n_times,
+        "embed_dim": args.vit_embed_dim,
+        "depth": args.vit_depth,
+        "num_heads": args.vit_heads,
+        "mlp_dim": args.vit_mlp_dim,
+        "dropout": args.vit_dropout,
         "optimizer": torch.optim.Adam,
         "lr": lr,
         "criterion": crit,
