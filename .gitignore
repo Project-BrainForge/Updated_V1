@@ -31,5 +31,5 @@ venv/
 
 *.pyc 
 *.npy
-*.txt
+
 *.mat
