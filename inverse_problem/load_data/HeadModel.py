@@ -76,7 +76,35 @@ class SourceSpace:
         #self.n_sources      = general_config_dict['source_space']['n_sources']
         self.constrained    = general_config_dict['source_space']['constrained_orientation']
 
-        source_info = load_mat("D:\\fyp\\stESI_pub\\anatomy\\sources_fsav_994.mat")
+        # Source geometry location:
+        # - for typical source spaces: stored under the head-model folder (folders.model_folder)
+        # - for the 994-region parcellation: stored under the repo-level `anatomy/` folder
+        if self.src_sampling == "fsav_994":
+            # Try to resolve relative to the current run root (folders.root_folder) first.
+            # `folders.root_folder` may be either the repo root or `.../simulation/<subject>`.
+            candidates = []
+            try:
+                root = os.path.abspath(folders.root_folder)
+                candidates.append(os.path.join(root, "anatomy", "sources_fsav_994.mat"))
+                candidates.append(
+                    os.path.join(os.path.dirname(root), "anatomy", "sources_fsav_994.mat")
+                )
+            except Exception:
+                pass
+
+            # Fallback: repo-relative to this file location
+            repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+            candidates.append(os.path.join(repo_root, "anatomy", "sources_fsav_994.mat"))
+
+            source_mat_path = next((p for p in candidates if os.path.isfile(p)), None)
+            if not source_mat_path:
+                raise FileNotFoundError(
+                    "Could not find `sources_fsav_994.mat`. Tried:\n- "
+                    + "\n- ".join(candidates)
+                )
+            source_info = load_mat(source_mat_path)
+        else:
+            source_info = load_mat(f"{folders.model_folder}/sources_{self.src_sampling}.mat")
 
         self.positions = source_info['positions']
         self.n_sources = self.positions.shape[0]
