@@ -30,6 +30,12 @@ parser.add_argument("-sn", "--subject_name", type=str, required=True, help="name
 parser.add_argument("-v", "--volume", action='store_true', help="Volume source space")
 parser.add_argument("-s", "--sphere", action="store_true", help="Spherical head model")
 parser.add_argument("-rf", "--root_folder", type=str, default=root_folder, help="Root of simulation folder")
+parser.add_argument(
+    "--leadfield_mat",
+    type=str,
+    default=None,
+    help="Optional path to a .mat leadfield to use instead of model/LF_<suf>.mat (e.g. anatomy/leadfield_75_20k.mat).",
+)
 
 # recodring/timeline parameters
 parser.add_argument("-fs", "--fs", type=int, default=512, help="Sampling frequency [Hz]")
@@ -134,8 +140,51 @@ p_width_dev       = args.intra_sample_dev[2]
 ## Load anatomy data
 # get the data using the unpack_fwdModel function
 
-src = loadmat(os.path.join(model_path, f"sources_{suf}.mat"))
-leadfield = loadmat(os.path.join(model_path, f"LF_{suf}.mat" ))['G']
+def _load_leadfield_mat(mat_path: str) -> np.ndarray:
+    m = loadmat(mat_path)
+    # Common keys in this codebase: 'G' (leadfield), or 'fwd' (leadfield_75_20k.mat)
+    if "G" in m:
+        return m["G"]
+    if "fwd" in m:
+        return m["fwd"]
+    # Fallback: first 2D numeric array
+    for k, v in m.items():
+        if k.startswith("__"):
+            continue
+        if isinstance(v, np.ndarray) and v.ndim == 2:
+            return v
+    raise KeyError(f"No 2D leadfield found in {mat_path}. Keys: {[k for k in m.keys() if not k.startswith('__')]}")
+
+
+def _compute_knn_neighbors(positions: np.ndarray, k: int = 10) -> np.ndarray:
+    """Simple kNN adjacency for region-level source spaces."""
+    pos = np.asarray(positions)
+    n = pos.shape[0]
+    nbs = np.zeros((n, k), dtype=np.int64)
+    # brute-force (n=994 is fine)
+    for i in range(n):
+        d = np.sum((pos - pos[i]) ** 2, axis=1)
+        d[i] = np.inf
+        nbs[i] = np.argsort(d)[:k]
+    return nbs
+
+# Leadfield + source positions
+leadfield = None
+spos = None
+
+# Optional override leadfield (e.g. 75x994 regional leadfield)
+if args.leadfield_mat is not None:
+    leadfield = _load_leadfield_mat(args.leadfield_mat)
+    # If regional (994), load matching region positions from repo anatomy.
+    if leadfield.shape[1] == 994:
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        src_994_path = os.path.join(repo_root, "anatomy", "sources_fsav_994.mat")
+        spos = loadmat(src_994_path)["positions"]
+else:
+    # Default: load source positions + leadfield from the head-model folder
+    src = loadmat(os.path.join(model_path, f"sources_{suf}.mat"))
+    spos = src["positions"]
+    leadfield = loadmat(os.path.join(model_path, f"LF_{suf}.mat"))["G"]
 
 ## Compute neighbors from the mesh triangle data
 #tlh     = loadmat(os.path.join(folder_path,f"tris_lh_{suf}.mat"))
@@ -146,28 +195,41 @@ leadfield = loadmat(os.path.join(model_path, f"LF_{suf}.mat" ))['G']
 #tris = np.array([np.squeeze(tlh['tris_lh']), np.squeeze(trh['tris_rh'])])
 #verts = np.array([np.squeeze(verts['lh']),np.squeeze(verts['rh']) ])
 import mne
-fwd = mne.read_forward_solution(
-    f"{model_path}/fwd_{args.source_sampling}-fwd.fif",
-    verbose=False)
-# constrain source orientation if necessary
-constrained = True
-if args.orientation=="unconstrained": 
-    constrained = False
-fwd = mne.convert_forward_solution(
-    fwd,
-    surf_ori=constrained,
-    force_fixed=constrained,
-    use_cps=True, verbose=0)
 
-vertices = [fwd["src"][0]["vertno"], fwd["src"][1]["vertno"]]
-# compute neighbors matrix:
-from utils import get_neighbors
-neighbors = get_neighbors(
-    [fwd["src"][0]["use_tris"], fwd["src"][1]["use_tris"]], vertices
-)
+n_sources = leadfield.shape[1]
+n_electrodes = leadfield.shape[0]
 
-n_sources = leadfield.shape[1]; n_electrodes = leadfield.shape[0]
-spos = src['positions']
+# If leadfield is the 994-region space, use the matching regional source positions
+# from the repo-level anatomy folder and compute neighbors via kNN.
+if n_sources == 994 and args.leadfield_mat is not None:
+    # spos already loaded above
+    neighbors = _compute_knn_neighbors(spos, k=10)
+else:
+    # Vertex/ico source spaces: use MNE forward for mesh neighbors
+    fwd = mne.read_forward_solution(
+        f"{model_path}/fwd_{args.source_sampling}-fwd.fif",
+        verbose=False,
+    )
+    # constrain source orientation if necessary
+    constrained = True
+    if args.orientation == "unconstrained":
+        constrained = False
+    fwd = mne.convert_forward_solution(
+        fwd,
+        surf_ori=constrained,
+        force_fixed=constrained,
+        use_cps=True,
+        verbose=0,
+    )
+
+    vertices = [fwd["src"][0]["vertno"], fwd["src"][1]["vertno"]]
+    # compute neighbors matrix:
+    from utils import get_neighbors
+
+    neighbors = get_neighbors([fwd["src"][0]["use_tris"], fwd["src"][1]["use_tris"]], vertices)
+    if spos is None:
+        src = loadmat(os.path.join(model_path, f"sources_{suf}.mat"))
+        spos = src["positions"]
 #######################################################################################
 ################## SIMULATION LOOP #########################################
 match_dict ={}

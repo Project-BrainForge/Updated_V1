@@ -6,3 +6,7 @@
 
 ## build deepsif based head model (NMMs experiments)
 python create_head_model.py -subject_name deepsif -source_sampling fsav_994 -deepsif_data Documents/deepsif/DeepSIF-Main/ -constrained -conductivity 0.33 0.004125 0.33 -electrode_montage standard_1020 -save
+
+
+
+python create_head_model.py -subject_name deepsif -source_sampling fsav_994 -deepsif_data D:\fyp\DeepSIF\anatomy -constrained -conductivity 0.33 0.004125 0.33 -electrode_montage standard_1020 -save

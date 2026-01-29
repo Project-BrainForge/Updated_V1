@@ -72,6 +72,12 @@ Example :
 python simu_extended_source.py -sin mes_debug_python -ne 100 -mk standard_1020 -ss ico3 -o constrained -sn fsaverage -fs 512 -d 500 -m 2 -np_min 1 -np_max 3 -o_min 1 -o_max 5 -amp 10 -w 60
 ```
 
+python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 100 -mk standard_1020 -ss fsav_994 -o constrained -sn fsaverage -rf D:/fyp/stESI_pub --leadfield_mat D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -fs 500 -d 500
+
+
+python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 100 -mk standard_1020 -ss fsav_994 -o constrained -sn fsaverage -rf D:/fyp/stESI_pub --leadfield_mat D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -fs 500 -d 1000
+
+python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 100 -mk standard_1020 -ss fsav_994 -o constrained -sn fsaverage -rf D:/fyp/stESI_pub --leadfield_mat D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -fs 500 -d 1000
 
 # NMM based data simulation 
 original code from: https://github.com/bfinl/DeepSIF

@@ -26,6 +26,7 @@ from utils.utl import CosineSimilarityLoss, logMSE
 from load_data.FolderStructure import FolderStructure
 from load_data import HeadModel
 import json
+from pathlib import Path
 
 # Training on GPU if available
 device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -48,6 +49,12 @@ parser.add_argument("-results_path", type=str, required=True, help="where to sav
 parser.add_argument("-orientation", type=str, default="constrained", help="constrained or unconstrained, orientation of the sources")
 parser.add_argument("-electrode_montage", type=str, default="standard_1020", help="name of the electrode montage to use")
 parser.add_argument("-source_space", type=str, default="ico3", help="name of the source space")
+parser.add_argument(
+    "-subject_name",
+    type=str,
+    default="fsaverage",
+    help="Subject name when using `simulation/<subject>/...` folder layout",
+)
 parser.add_argument(
     "-simu_type", type=str, help="type of simulation used (NMM or SEREEGA)"
 )
@@ -89,9 +96,21 @@ parser.add_argument(
 parser.add_argument(
     "-kernel_size", type=int, default=5, help="kernel size of the 1D CNN"
 )
+parser.add_argument(
+    "-deepsif_temporal_input_size",
+    type=int,
+    default=500,
+    help="DeepSIF hidden size (called temporal_input_size in the original implementation)",
+)
+parser.add_argument(
+    "-leadfield_mat",
+    type=str,
+    default=None,
+    help="Optional path to a .mat leadfield to use (overrides model leadfield).",
+)
 
 parser.add_argument(
-    "-n_epochs", "--ep", default=100, type=int, help="number of epochs for training"
+    "-n_epochs", "--ep", default=5, type=int, help="number of epochs for training"
 )
 parser.add_argument(
     "-no_early_stop", action="store_false", help="do not use early stopping"
@@ -122,26 +141,82 @@ os.makedirs(f"{results_path}/{args.sfolder}", exist_ok=True)
 ## -------------------------------------- LOAD DATA ----------------------------------------------- ##
 root_simu = args.root_simu
 
-simu_path = f"{root_simu}/{args.orientation}/{args.electrode_montage}/{args.source_space}/simu/{args.simu_name}"
-model_path = f"{root_simu}/{args.orientation}/{args.electrode_montage}/{args.source_space}/model"
+root_simu_path = Path(root_simu)
+# Support both layouts:
+#   A) <root>/<ori>/<montage>/<src>/simu/<simu_name>
+#   B) <root>/simulation/<subject>/<ori>/<montage>/<src>/simu/<simu_name>
+if (root_simu_path / "simulation" / args.subject_name).is_dir():
+    root_base = root_simu_path / "simulation" / args.subject_name
+else:
+    root_base = root_simu_path
+
+simu_path = str(
+    root_base
+    / args.orientation
+    / args.electrode_montage
+    / args.source_space
+    / "simu"
+    / args.simu_name
+)
+model_path = str(
+    root_base / args.orientation / args.electrode_montage / args.source_space / "model"
+)
 
 
-config_file = f"{simu_path}/{args.simu_name}{args.source_space}_config.json"
+# config_file = f"{simu_path}/{args.simu_name}{args.source_space}_config.json"
 
-with open(config_file, "r") as f:
-    general_config_dict = json.load(f)
-general_config_dict["eeg_snr"] = args.eeg_snr
-general_config_dict["simu_name"] = args.simu_name
+# with open(config_file, "r") as f:
+#     general_config_dict = json.load(f)
 
-folders = FolderStructure(root_simu, general_config_dict)
+general_config_dict = {
+    "eeg_snr": args.eeg_snr,
+    "simu_name": args.simu_name,
+    "source_space": {
+        "constrained_orientation": args.orientation == "constrained",
+        "src_sampling": args.source_space,
+    },
+    "electrode_space": {
+        "electrode_montage": args.electrode_montage,
+    },
+}
+folders = FolderStructure(str(root_base), general_config_dict)
 source_space_obj = HeadModel.SourceSpace(folders, general_config_dict)
 
-# load the proper leadfield for the regional source space :
-if args.source_space == "fsav_994":
+def _load_leadfield_mat(mat_path: str):
+    m = loadmat(mat_path)
+    if "G" in m:
+        return m["G"]
+    if "fwd" in m:
+        return m["fwd"]
+    for k, v in m.items():
+        if k.startswith("__"):
+            continue
+        if isinstance(v, np.ndarray) and getattr(v, "ndim", 0) == 2:
+            return v
+    raise KeyError(f"No leadfield matrix found in {mat_path}. Keys={list(m.keys())}")
+
+
+# --------------------------- Leadfield loading --------------------------- #
+if args.leadfield_mat:
+    fwd = _load_leadfield_mat(args.leadfield_mat)
+elif args.source_space == "fsav_994" and os.path.isfile(f"{model_path}/LF_fsav_994.mat"):
     fwd = loadmat(f"{model_path}/LF_fsav_994.mat")["G"]
-# else ? ## TODO
+else:
+    electrode_space_obj = HeadModel.ElectrodeSpace(folders, general_config_dict)
+    head_model = HeadModel.HeadModel(
+        electrode_space_obj, source_space_obj, folders, subject_name=args.subject_name
+    )
+    fwd = head_model.fwd["sol"]["data"]
+
+print("fwd.shape:", fwd.shape)
+
 ############################### LOAD DATA ################################
 if args.simu_type.upper() == "NMM":
+    if args.source_space != "fsav_994":
+        sys.exit(
+            "NMM spike simulations require the 994-region source space. "
+            "Please run with `-source_space fsav_994` (and a matching leadfield)."
+        )
     spikes_data_path = f"{root_simu}/{args.orientation}/{args.electrode_montage}/{args.source_space}/simu/{args.spikes_folder}"
     dataset_meta_path = f"{simu_path}/{args.simu_name}.mat"
 
@@ -156,8 +231,10 @@ if args.simu_type.upper() == "NMM":
     )
 
 elif args.simu_type.upper() == "SEREEGA":
-    simu_data_path = f"{home}/Documents/Data/simulation"
-    config_file = f"{simu_data_path}/{args.simu_name}{args.source_space}_config.json"
+    # simu_data_path = f"{home}/Documents/Data/simulation"
+    # config_file = f"{simu_data_path}/{args.simu_name}{args.source_space}_config.json"
+    
+    config_file = f"{simu_path}/{args.simu_name}{args.source_space}_config.json"
 
     ds_dataset = EsiDatasetds_new(
         root_simu,
@@ -240,7 +317,7 @@ elif args.model.upper() == "DEEPSIF":
     net_parameters = {
         "num_sensor": n_electrodes,
         "num_source": n_sources,
-        "temporal_input_size": 500,
+        "temporal_input_size": args.deepsif_temporal_input_size,
         "optimizer": torch.optim.Adam,
         "lr": lr,
         "criterion": crit,
@@ -288,9 +365,13 @@ checkpoint_callback = ModelCheckpoint(
     monitor="train_loss",
 )
 
-logger = TensorBoardLogger(
-    save_dir=f"{results_path}/logs/")#, name=f"{args.sfolder}")#, 
-#    version=f"{args.model.lower()}_{args.simu_type.lower()}_trainsize_{n_train_samples}_loss_{args.loss}_norm_{args.scaler}")
+try:
+    logger = TensorBoardLogger(save_dir=f"{results_path}/logs/")
+except ModuleNotFoundError:
+    # TensorBoard is optional; fall back to CSV logging to avoid crashing.
+    from pytorch_lightning.loggers import CSVLogger
+
+    logger = CSVLogger(save_dir=f"{results_path}/logs/")
 
 # gradient clipping
 if args.model.upper() == "LSTM":

@@ -2,19 +2,18 @@ import sys
 
 import numpy as np
 from utils.utl import load_mat
+import os
 
-import mne
-from mne.datasets import sample
-from mne.io import read_raw_fif
-def make_sample_montage():
-    data_path = sample.data_path() 
-    fname_raw = data_path / "MEG" / "sample" / "sample_audvis_raw.fif"
-    raw = read_raw_fif(fname_raw) 
-    raw.pick_types(meg=False, eeg=True, stim=False, exclude=()).load_data()
-    raw.pick_types(eeg=True)
+"""
+This module originally relied on `mne` for:
+- Loading forward solutions from FIF files
+- Creating montage/info objects for EEG
 
-    dig_montage = raw.info.get_montage()
-    return dig_montage
+For environments where `mne` is not available or not desired, this file now
+supports a "no-mne" workflow:
+- Leadfield is loaded from a `.mat` file (e.g. `anatomy/leadfield_75_20k.mat`)
+- Electrode space is described by basic arrays (names, positions, fs)
+"""
 
 class ElectrodeSpace:
     """  
@@ -48,35 +47,12 @@ class ElectrodeSpace:
         self.montage_kind = general_config_dict['electrode_space']['electrode_montage']
         self.electrode_names = [k for k in electrode_info['names']]
 
-        # recreate the electrode montage from mne python
-        if self.montage_kind in mne.channels.get_builtin_montages( ): 
-            self.electrode_montage = mne.channels.make_standard_montage(
-                self.montage_kind)
-        #elif self.montage_kind == "spm": 
-        #    self.electrode_montage = ld.make_spm_montage() 
-        elif self.montage_kind == "sample":
-            self.electrode_montage = make_sample_montage()
-        else: 
-            sys.exit("Error: unknown electrode montage")
-
-        if self.montage_kind == "standard_1020": 
-            exclude_mdn             = ['T3', 'T4', 'T5', 'T6']
-            ids_duplicate = []
-            for e in exclude_mdn:
-                ids_duplicate.append( np.where( [ch==e for ch in self.electrode_montage.ch_names] )[0][0] )
-            ch_names = list( np.delete(self.electrode_montage.ch_names, ids_duplicate) )
-            
-            self.info = mne.create_info(
-                ch_names, 
-                general_config_dict['rec_info']['fs'], 
-                ch_types='eeg', verbose=False)            
-        else : 
-            self.info = mne.create_info(
-                self.electrode_montage.ch_names, general_config_dict['rec_info']['fs'], ch_types='eeg', verbose=None)
-        
-        self.info.set_montage(self.electrode_montage)
-
-        self.fs = general_config_dict['rec_info']['fs']
+        # In "no-mne" mode we keep only lightweight descriptors.
+        # If you need MNE objects, build them in a separate optional module.
+        rec_info = general_config_dict.get("rec_info", {}) if isinstance(general_config_dict, dict) else {}
+        self.fs = rec_info.get("fs", None)
+        self.electrode_montage = None
+        self.info = None
 
     def _attributes(self):
         """
@@ -100,8 +76,7 @@ class SourceSpace:
         #self.n_sources      = general_config_dict['source_space']['n_sources']
         self.constrained    = general_config_dict['source_space']['constrained_orientation']
 
-        source_info = load_mat(
-            f"{folders.model_folder}/sources_{self.src_sampling}.mat")
+        source_info = load_mat("D:\\fyp\\stESI_pub\\anatomy\\sources_fsav_994.mat")
 
         self.positions = source_info['positions']
         self.n_sources = self.positions.shape[0]
@@ -133,20 +108,61 @@ class HeadModel:
         self.source_space       = source_space
 
         self.subject_name       = subject_name
-        # get the forward object from mne python
-        fwd = mne.read_forward_solution(
-            f"{folders.model_folder}/fwd_{source_space.src_sampling}-fwd.fif",
-            verbose=False)
-        # constrain source orientation if necessary
-        self.fwd = mne.convert_forward_solution(
-            fwd,
-            surf_ori=source_space.constrained,
-            force_fixed=source_space.constrained,
-            use_cps=True, verbose=0)
+        # "no-mne" forward structure: we only keep the leadfield matrix in a dict
+        # compatible with the rest of the codebase (`fwd['sol']['data']`).
+        self.fwd = {"sol": {"data": None}}
+        self.leadfield = None
 
-        self.leadfield = self.fwd['sol']['data']
+        # If available, override with the repository-provided leadfield matrix
+        # (keeps `self.fwd` structure but sets the gain matrix).
+        #
+        # Expected file: <repo_root>/anatomy/leadfield_75_20k.mat
+        # Common keys inside the .mat: 'fwd' or 'G'
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        default_lf_mat_path = os.path.join(repo_root, "anatomy", "leadfield_75_20k.mat")
+
+        # Allow overriding via env var, and keep a Windows fallback used elsewhere in the repo.
+        lf_candidates = []
+        env_path = os.environ.get("STESI_LEADFIELD_MAT", "").strip()
+        if env_path:
+            lf_candidates.append(env_path)
+        lf_candidates.append(default_lf_mat_path)
+        if os.name == "nt":
+            lf_candidates.append(r"D:\fyp\stESI_pub\anatomy\leadfield_75_20k.mat")
+
+        lf_mat_path = next((p for p in lf_candidates if os.path.isfile(p)), None)
+        if not lf_mat_path:
+            raise FileNotFoundError(
+                "No leadfield file found. Tried:\n- "
+                + "\n- ".join(lf_candidates)
+                + "\nSet STESI_LEADFIELD_MAT to point to your leadfield .mat."
+            )
+
+        try:
+            from scipy.io import loadmat
+
+            lf_mat = loadmat(lf_mat_path)
+            lf = None
+            for k in ("fwd", "G", "leadfield"):
+                if k in lf_mat:
+                    lf = lf_mat[k]
+                    break
+            if lf is None:
+                raise KeyError(
+                    f"Could not find leadfield array in {lf_mat_path}. "
+                    f"Available keys: {sorted([k for k in lf_mat.keys() if not k.startswith('__')])}"
+                )
+
+            self.fwd["sol"]["data"] = lf
+            self.leadfield = lf
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load leadfield from {lf_mat_path}: {e}"
+            ) from e
+
         # add orientation to source space
-        self.source_space.orientations = self.fwd['source_nn']
+        # Not available without MNE forward; keep empty unless provided elsewhere.
+        self.source_space.orientations = getattr(self.source_space, "orientations", [])
 
     def _attributes(self):
         """

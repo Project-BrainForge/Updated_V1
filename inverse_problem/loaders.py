@@ -4,9 +4,15 @@ from scipy.io import loadmat, savemat
 #import h5py
 from utils.utils_deepsif import add_white_noise, ispadding
 import random
-import mne
+try:
+    import mne  # optional (used only for optional filtering)
+    HAS_MNE = True
+except ModuleNotFoundError:
+    mne = None
+    HAS_MNE = False
 import json
 from os.path import expanduser
+import os
 
 ############# for sereega dataset
 from load_data import utl_data
@@ -60,7 +66,6 @@ class EsiDatasetds_new(Dataset):
         super().__init__()
         self.to_load = to_load
         self.root_simu = root_simu
-        home = os.path.expanduser("~")
 
         self.config_file = config_file
         self.simu_name = simu_name
@@ -78,8 +83,12 @@ class EsiDatasetds_new(Dataset):
             self.ori = "constrained"
         else:
             self.ori = "unconstrained"
-        # build data folder name
-        data_folder_name = f"{home}/Documents/Data/simulation/{self.ori}/{self.electrode_montage}/{self.source_space}/simu"
+        # Build data folder name from the provided `root_simu` (portable across OSes)
+        data_folder_name = os.path.normpath(
+            os.path.join(
+                self.root_simu, self.ori, self.electrode_montage, self.source_space, "simu"
+            )
+        )
 
         (
             self.ids,
@@ -147,6 +156,11 @@ class EsiDatasetds_new(Dataset):
             self.max_src[index] = eeg_data_bis.abs().max()  # usefull for unscaling
             eeg_data = eeg_data_bis / eeg_data_bis.abs().max()
             src_data = src_data / eeg_data_bis.abs().max()
+            
+            
+        # save as mat file with index as the file name 
+        # need only one mat with bot eeg anfd source data
+        #savemat(f"eeg_and_src_data_{index}.mat", {"eeg_data": eeg_data, "src_data": src_data})
 
         return eeg_data, src_data
 
@@ -546,13 +560,28 @@ class SpikeEEGBuildEval(Dataset):
 
         # filter data into narrow band
         if "lfreq" in self.eval_params:
-            noisy_eeg = mne.filter.filter_data(
-                np.tile(noisy_eeg.transpose(), (1, 5)),
-                500,
-                self.eval_params["lfreq"],
-                self.eval_params["hfreq"],
-                verbose=False,
-            ).transpose()
+            # To reduce border effects, tile in time then crop back.
+            tiled = np.tile(noisy_eeg.transpose(), (1, 5))  # (n_ch, n_time*5)
+            fs = 500
+            lfreq = self.eval_params["lfreq"]
+            hfreq = self.eval_params["hfreq"]
+            if HAS_MNE:
+                filtered = mne.filter.filter_data(
+                    tiled,
+                    fs,
+                    lfreq,
+                    hfreq,
+                    verbose=False,
+                )
+            else:
+                # Lightweight fallback without MNE
+                from scipy.signal import butter, filtfilt
+
+                nyq = fs / 2.0
+                b, a = butter(4, [lfreq / nyq, hfreq / nyq], btype="band")
+                filtered = filtfilt(b, a, tiled, axis=1)
+
+            noisy_eeg = filtered.transpose()
             noisy_eeg = noisy_eeg[1000:1500]
 
         noisy_eeg = noisy_eeg - np.mean(noisy_eeg, axis=0, keepdims=True)  # time

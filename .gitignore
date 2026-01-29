@@ -19,6 +19,16 @@ simu_sereega/utils/
 simu_sereega/mains/
 simu_sereega/*.csv
 
+inverse_problem/results/
+
+simulation/
+
+mes_debug_python/
+
+leadfield_90/
+
+venv/
+
 *.pyc 
 *.npy
 *.txt

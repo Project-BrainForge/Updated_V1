@@ -8,9 +8,15 @@ import datetime
 import os
 import sys
 from os.path import expanduser
+from pathlib import Path
 
 # Import librairies
-import mne
+try:
+    import mne  # optional dependency
+    HAS_MNE = True
+except ModuleNotFoundError:
+    mne = None
+    HAS_MNE = False
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
@@ -55,6 +61,18 @@ parser.add_argument(
 parser.add_argument("-orientation", type=str, default="constrained", help="constrained or unconstrained, orientation of the sources")
 parser.add_argument("-electrode_montage", type=str, default="standard_1020", help="name of the electrode montage to use")
 parser.add_argument("-source_space", type=str, default="ico3", help="name of the source space")
+parser.add_argument(
+    "-subject_name",
+    type=str,
+    default="fsaverage",
+    help="Subject name when using `simulation/<subject>/...` folder layout",
+)
+parser.add_argument(
+    "-leadfield_mat",
+    type=str,
+    default=None,
+    help="Optional path to a .mat leadfield to use for evaluation (e.g. anatomy/leadfield_75_20k.mat).",
+)
 
 parser.add_argument("-spikes_folder", type=str, default="nmm_spikes_nov23", help="folder with spikes for NMM based simulations")
 parser.add_argument(
@@ -77,9 +95,6 @@ parser.add_argument(
     default=5,
     type=int,
     help="SNR of the EEG data (additive white gaussian noise)",
-)
-parser.add_argument(
-    "-subject_name", type=str, default="fsaverage", help="name of the subject used"
 )
 
 
@@ -119,6 +134,16 @@ parser.add_argument(
     "-train_sfolder", type=str, default="eval", help="name of the folder in which network are saved"
 )
 parser.add_argument(
+    "-train_run_dir",
+    type=str,
+    default=None,
+    help=(
+        "Optional path to a specific training run directory (containing a "
+        "`trained_models/` subfolder). If provided, NN model weights are loaded from "
+        "this folder instead of being inferred from -train_* parameters."
+    ),
+)
+parser.add_argument(
     "-inter_layer", type=int, default=2048, help="number of channels of the 1dcnn"
 )
 parser.add_argument(
@@ -139,6 +164,90 @@ parser.add_argument(
 )
 
 args = parser.parse_args()
+# ----------------------------------------------------------------------#
+def _normalize_methods(method_list):
+    """Accept a few common aliases for method names."""
+    normalized = []
+    for m in method_list:
+        ml = m.lower()
+        if ml in ("deepsif", "deep_sif", "deep-sif"):
+            normalized.append("deep_sif")
+        elif ml in ("cnn1d", "cnn_1d", "1dcnn", "1d_cnn"):
+            normalized.append("cnn_1d")
+        else:
+            normalized.append(m)
+    return normalized
+
+
+def _pick_model_path_from_run_dir(run_dir: str, method: str) -> str:
+    """
+    Find a `.pt` model weights file inside a training run directory.
+    Expected structure (as produced by `main_train.py`):
+      <run_dir>/trained_models/<MODEL>_model.pt
+    """
+    trained_models_dir = os.path.join(run_dir, "trained_models")
+    candidates = []
+    if method == "cnn_1d":
+        candidates = [
+            os.path.join(trained_models_dir, "1dcnn_model.pt"),
+            os.path.join(trained_models_dir, "1DCNN_model.pt"),
+            os.path.join(trained_models_dir, "CNN1D_model.pt"),
+            os.path.join(trained_models_dir, "cnn_1d_model.pt"),
+        ]
+    elif method == "lstm":
+        candidates = [
+            os.path.join(trained_models_dir, "lstm_model.pt"),
+            os.path.join(trained_models_dir, "LSTM_model.pt"),
+        ]
+    elif method == "deep_sif":
+        candidates = [
+            os.path.join(trained_models_dir, "DEEPSIF_model.pt"),
+            os.path.join(trained_models_dir, "deepsif_model.pt"),
+            os.path.join(trained_models_dir, "DeepSIF_model.pt"),
+            os.path.join(trained_models_dir, "deep_sif_model.pt"),
+        ]
+
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+
+    if os.path.isdir(trained_models_dir):
+        pt_files = [
+            f
+            for f in os.listdir(trained_models_dir)
+            if isinstance(f, str) and f.lower().endswith(".pt")
+        ]
+        if len(pt_files) == 1:
+            return os.path.join(trained_models_dir, pt_files[0])
+
+        # try a soft keyword match if multiple pt files exist
+        kw = {"cnn_1d": "cnn", "lstm": "lstm", "deep_sif": "sif"}.get(method, "")
+        if kw:
+            for f in pt_files:
+                if kw in f.lower():
+                    return os.path.join(trained_models_dir, f)
+
+    raise FileNotFoundError(
+        f"Could not locate model weights for method '{method}' under:\n"
+        f"- {trained_models_dir}\n"
+        "Expected something like `<run_dir>/trained_models/<MODEL>_model.pt`."
+    )
+# Normalize methods early so we can decide whether MNE is needed.
+methods_requested = _normalize_methods(args.methods)
+
+# Only linear inverse methods require `mne`
+USE_MNE_LINEAR = HAS_MNE and any(m in linear_methods for m in methods_requested)
+if any(m in linear_methods for m in methods_requested) and not HAS_MNE:
+    # If user explicitly requested methods, fail loudly. If they used defaults,
+    # silently drop linear methods so the script can run without MNE.
+    user_set_methods = any(f in sys.argv for f in ("-mets", "--methods"))
+    if user_set_methods:
+        sys.exit(
+            "You selected linear methods (MNE/sLORETA) but `mne` is not installed. "
+            "Install `mne` or remove linear methods from `-mets`."
+        )
+    methods_requested = [m for m in methods_requested if m not in linear_methods]
+    USE_MNE_LINEAR = False
 #----------------------------------------------------------------------#
 root_simu = args.root_simu
 results_path = args.results_path
@@ -147,8 +256,23 @@ eval_results_path = f"{results_path}/{dataset}/eval/{args.sfolder}"
 os.makedirs(eval_results_path, exist_ok=True)
 
 ##----------------LOAD EVAL DATA---------------------##
-simu_path = f"{root_simu}/{args.orientation}/{args.electrode_montage}/{args.source_space}/simu/{args.simu_name}"
-model_path = f"{root_simu}/{args.orientation}/{args.electrode_montage}/{args.source_space}/model"
+root_simu_path = Path(root_simu)
+if (root_simu_path / "simulation" / args.subject_name).is_dir():
+    root_base = root_simu_path / "simulation" / args.subject_name
+else:
+    root_base = root_simu_path
+
+simu_path = str(
+    root_base
+    / args.orientation
+    / args.electrode_montage
+    / args.source_space
+    / "simu"
+    / args.simu_name
+)
+model_path = str(
+    root_base / args.orientation / args.electrode_montage / args.source_space / "model"
+)
 config_file = f"{simu_path}/{args.simu_name}{args.source_space}_config.json"
 
 with open(config_file, "r") as f:
@@ -156,15 +280,34 @@ with open(config_file, "r") as f:
 general_config_dict["eeg_snr"] = args.eeg_snr
 general_config_dict["simu_name"] = args.simu_name
 
-folders = FolderStructure(root_simu, general_config_dict)
+folders = FolderStructure(str(root_base), general_config_dict)
 source_space = HeadModel.SourceSpace(folders, general_config_dict)
 electrode_space = HeadModel.ElectrodeSpace(folders, general_config_dict)
 head_model = HeadModel.HeadModel(electrode_space, source_space, folders, "fsaverage")
 
-if args.source_space == "fsav_994" : 
+def _load_leadfield_mat(mat_path: str):
+    m = loadmat(mat_path)
+    if "G" in m:
+        return m["G"]
+    if "fwd" in m:
+        return m["fwd"]
+    for k, v in m.items():
+        if k.startswith("__"):
+            continue
+        if isinstance(v, np.ndarray) and getattr(v, "ndim", 0) == 2:
+            return v
+    raise KeyError(f"No leadfield matrix found in {mat_path}. Keys={list(m.keys())}")
+
+
+if args.leadfield_mat:
+    fwd = _load_leadfield_mat(args.leadfield_mat)
+elif args.source_space == "fsav_994":
     fwd = loadmat(f"{model_path}/LF_fsav_994.mat")["G"]
-else : 
-    fwd = head_model.fwd['sol']['data']
+else:
+    fwd = head_model.fwd["sol"]["data"]
+
+# Ensure consistent dtype for torch matmul (avoid float64 from .mat files)
+fwd = np.asarray(fwd, dtype=np.float32)
 
 ## open neighbors file if it was already re-shaped
 if os.path.isfile(f"{folders.model_folder}/fs_cortex_neighbors_994.mat"):
@@ -196,29 +339,40 @@ fs = general_config_dict["rec_info"]["fs"]
 n_times = general_config_dict["rec_info"]["n_times"]
 t_vec = np.arange(0, n_times / fs, 1 / fs)
 spos = torch.from_numpy(source_space.positions)  # in meter
-mne_info = head_model.electrode_space.info
+mne_info = getattr(head_model.electrode_space, "info", None)
+if mne_info is None or getattr(mne_info, "nchan", None) != fwd.shape[0]:
+    ch_names = [f"EEG{c:03d}" for c in range(1, fwd.shape[0] + 1)]
+    mne_info = mne.create_info(ch_names=ch_names, sfreq=fs, ch_types="eeg", verbose=False)
 
 ### load the 2 source spaces and region mapping
-fwd_vertices = mne.read_forward_solution(
-    f"{folders.model_folder}/fwd_verticesfsav_994-fwd.fif"
-)
-fwd_vertices = mne.convert_forward_solution(
-    fwd_vertices, surf_ori=True, force_fixed=True, use_cps=True, verbose=0
-)
-fwd_regions = mne.read_forward_solution(f"{folders.model_folder}/fwd_fsav_994-fwd.fif")
-fwd_regions = mne.convert_forward_solution(
-    fwd_regions, surf_ori=True, force_fixed=True, use_cps=True, verbose=0
-)
+if USE_MNE_LINEAR:
+    fwd_vertices = mne.read_forward_solution(
+        f"{folders.model_folder}/fwd_verticesfsav_994-fwd.fif"
+    )
+    fwd_vertices = mne.convert_forward_solution(
+        fwd_vertices, surf_ori=True, force_fixed=True, use_cps=True, verbose=0
+    )
+    fwd_regions = mne.read_forward_solution(f"{folders.model_folder}/fwd_fsav_994-fwd.fif")
+    fwd_regions = mne.convert_forward_solution(
+        fwd_regions, surf_ori=True, force_fixed=True, use_cps=True, verbose=0
+    )
 
-## !! assign fwd_region the proper leadfield matrix values (summed version)
-fwd_regions["sol"]["data"] = fwd
+    ## assign fwd_region the proper leadfield matrix values (summed version)
+    fwd_regions["sol"]["data"] = fwd
 
-region_mapping = loadmat(f"{folders.model_folder}/fs_cortex_20k_region_mapping.mat")[
-    "rm"
-][0]
-
-n_vertices = fwd_vertices["nsource"]
-n_regs = len(np.unique(region_mapping))
+    region_mapping = loadmat(f"{folders.model_folder}/fs_cortex_20k_region_mapping.mat")[
+        "rm"
+    ][0]
+    n_vertices = fwd_vertices["nsource"]
+    n_regs = len(np.unique(region_mapping))
+else:
+    # For NN-only evaluation on regional source spaces (e.g. 994 regions),
+    # we never need to expand regions back to the 20k-vertex surface.
+    fwd_vertices = None
+    fwd_regions = None
+    region_mapping = None
+    n_vertices = fwd.shape[1]
+    n_regs = fwd.shape[1]
 ####################################################################
 ## load dataset
 if args.eval_simu_type.upper() == "NMM":
@@ -302,7 +456,7 @@ else :
 ##############################################################################################################################################
 ############### load networks
 
-methods = args.methods
+methods = methods_requested
 
 if "cnn_1d" in methods:
     if args.net_from_file : 
@@ -311,15 +465,13 @@ if "cnn_1d" in methods:
 
     from models.cnn_1d import CNN1Dpl as cnn1d_net
 
-    if (
-        cnn1d_params["n_electrodes"] != head_model.electrode_space.n_electrodes
-        or cnn1d_params["n_sources"] != head_model.source_space.n_sources
-    ):
+    # Compare against the actually used forward model (`fwd`), not the MNE head model.
+    if (cnn1d_params["n_electrodes"] != n_electrodes) or (cnn1d_params["n_sources"] != n_sources):
         sys.exit(
             (
                 f"number of electrodes or sources in head model does not match with number of electrodes or sources in 1dcnn model"
-                f"electrodes head model : {head_model.electrode_space.n_electrodes} - electrodes 1dcnn : {cnn1d_params['n_electrodes']}\n"
-                f"sources head model : {head_model.source_space.n_sources} - sources 1dcnn : {cnn1d_params['n_sources']}"
+                f"electrodes fwd : {n_electrodes} - electrodes 1dcnn : {cnn1d_params['n_electrodes']}\n"
+                f"sources fwd : {n_sources} - sources 1dcnn : {cnn1d_params['n_sources']}"
             )
         )
 
@@ -333,7 +485,10 @@ if "cnn_1d" in methods:
         f"_loss_{cnn1d_params['loss']}"
         f"_norm_{cnn1d_params['norm']}.pt"
     )
-    cnn_model_path = f"{train_results_path}/trained_models/{cnn1d_params['exp']}/{cnn_model_name}"
+    if args.train_run_dir:
+        cnn_model_path = _pick_model_path_from_run_dir(args.train_run_dir, "cnn_1d")
+    else:
+        cnn_model_path = f"{train_results_path}/trained_models/{cnn1d_params['exp']}/{cnn_model_name}"
     if os.path.exists(cnn_model_path):
         print("CNN model is available for use")
     else:
@@ -366,15 +521,13 @@ if "lstm" in methods:
     if args.net_from_file : 
         train_dataset = lstm_params['dataset']
     train_results_path = f"{results_path}/{train_dataset}"
-    if (
-        lstm_params["n_electrodes"] != head_model.electrode_space.n_electrodes
-        or lstm_params["n_sources"] != head_model.source_space.n_sources
-    ):
+    # Compare against the actually used forward model (`fwd`), not the MNE head model.
+    if (lstm_params["n_electrodes"] != n_electrodes) or (lstm_params["n_sources"] != n_sources):
         sys.exit(
             (
                 f"number of electrodes or sources in head model does not match with number of electrodes or sources in lstm model"
-                f"electrodes head model : {head_model.electrode_space.n_electrodes } - electrodes lstm : {lstm_params['n_electrodes']}"
-                f"sources head model : {head_model.source_space.n_sources } - sources lstm : {lstm_params['n_sources']}"
+                f"electrodes fwd : {n_electrodes} - electrodes lstm : {lstm_params['n_electrodes']}"
+                f"sources fwd : {n_sources} - sources lstm : {lstm_params['n_sources']}"
             )
         )
 
@@ -387,7 +540,10 @@ if "lstm" in methods:
         f"_loss_{lstm_params['loss']}"
         f"_norm_{lstm_params['norm']}.pt"
     )
-    lstm_model_path = f"{train_results_path}/trained_models/{lstm_params['exp']}/{lstm_model_name}"
+    if args.train_run_dir:
+        lstm_model_path = _pick_model_path_from_run_dir(args.train_run_dir, "lstm")
+    else:
+        lstm_model_path = f"{train_results_path}/trained_models/{lstm_params['exp']}/{lstm_model_name}"
     if os.path.exists(lstm_model_path):
         print("LSTM model is available for use")
     else:
@@ -418,15 +574,13 @@ if "deep_sif" in methods:
     if args.net_from_file : 
         train_dataset = deep_sif_params['dataset']
     train_results_path = f"{results_path}/{train_dataset}"
-    if (
-        deep_sif_params["n_electrodes"] != head_model.electrode_space.n_electrodes
-        or deep_sif_params["n_sources"] != head_model.source_space.n_sources
-    ):
+    # Compare against the actually used forward model (`fwd`), not the MNE head model.
+    if (deep_sif_params["n_electrodes"] != n_electrodes) or (deep_sif_params["n_sources"] != n_sources):
         sys.exit(
             (
                 f"number of electrodes or sources in head model does not match with number of electrodes or sources in deep sif model"
-                f"electrodes head model : {head_model.electrode_space.n_electrodes} - electrodes deep sif : {deep_sif_params['n_electrodes']}"
-                f"sources head model : {head_model.source_space.n_sources} - sources deep sif : {deep_sif_params['n_sources']}"
+                f"electrodes fwd : {n_electrodes} - electrodes deep sif : {deep_sif_params['n_electrodes']}"
+                f"sources fwd : {n_sources} - sources deep sif : {deep_sif_params['n_sources']}"
             )
         )
 
@@ -439,7 +593,10 @@ if "deep_sif" in methods:
         f"_loss_{deep_sif_params['loss']}"
         f"_norm_{deep_sif_params['norm']}.pt"
     )
-    deep_sif_model_path = f"{train_results_path}/trained_models/{deep_sif_params['exp']}/{deep_sif_model_name}"
+    if args.train_run_dir:
+        deep_sif_model_path = _pick_model_path_from_run_dir(args.train_run_dir, "deep_sif")
+    else:
+        deep_sif_model_path = f"{train_results_path}/trained_models/{deep_sif_params['exp']}/{deep_sif_model_name}"
     if os.path.exists(deep_sif_model_path):
         print("DEEP SIF model is available for use")
     else:
@@ -507,9 +664,11 @@ for k in val_ds.indices:
     M_unscaled = M * val_ds.dataset.max_eeg[k]
     j_unscaled = j * val_ds.dataset.max_src[k]
 
-    j_unscaled_vertices = np.zeros((n_vertices, n_times))
-    for r in range(n_regs):
-        j_unscaled_vertices[np.where(region_mapping == r)[0], :] = j_unscaled[r, :]
+    j_unscaled_vertices = None
+    if region_mapping is not None:
+        j_unscaled_vertices = np.zeros((n_vertices, n_times))
+        for r in range(n_regs):
+            j_unscaled_vertices[np.where(region_mapping == r)[0], :] = j_unscaled[r, :]
 
     # data covariance:
     # activity_thresh = 0.1
@@ -517,28 +676,32 @@ for k in val_ds.indices:
     #    (M_unscaled).numpy(), mne_info, activity_thresh
     # )
 
-    ### TEST BETTER NOISE COV
-    raw_noise = mne.io.RawArray(
-        data=np.random.randn(head_model.electrode_space.n_electrodes, 600),
-        info=mne_info,verbose=False
-    )
-    noise_cov = mne.compute_raw_covariance(raw_noise, verbose=False)
-    data_cov = 1
-    if data_cov is not None:
-        ## ici il y a un distinction à faire selon les jeux de données
-        if args.eval_simu_type == "sereega":
-            seeds = val_ds.dataset.md_dict[md_keys[k]]["seeds"]
-            if type(seeds) is int:
-                seeds = [seeds]
-        else:
-            seeds = list(val_ds.dataset.dataset_meta["selected_region"][k][:, 0])
-            if type(seeds) is int:
-                seeds = [seeds]
+    # Noise covariance / EEG object are only needed for linear MNE inverses.
+    if USE_MNE_LINEAR:
+        raw_noise = mne.io.RawArray(
+            data=np.random.randn(n_electrodes, 600),
+            info=mne_info,
+            verbose=False,
+        )
+        noise_cov = mne.compute_raw_covariance(raw_noise, verbose=False)
 
         eeg = mne.io.RawArray(
-            data=M, info=head_model.electrode_space.info, first_samp=0.0, verbose=False
+            data=M, info=mne_info, first_samp=0.0, verbose=False
         )
         eeg = mne.set_eeg_reference(eeg, "average", projection=True, verbose=False)[0]
+    else:
+        noise_cov = None
+        eeg = None
+
+    ## ici il y a un distinction à faire selon les jeux de données
+    if args.eval_simu_type == "sereega":
+        seeds = val_ds.dataset.md_dict[md_keys[k]]["seeds"]
+        if type(seeds) is int:
+            seeds = [seeds]
+    else:
+        seeds = list(val_ds.dataset.dataset_meta["selected_region"][k][:, 0])
+        if type(seeds) is int:
+            seeds = [seeds]
 
         # stc_gt = mne.SourceEstimate(
         #    data=j_unscaled_vertices, # 256//2 = instant du pic à visualiser @TODO : change le codage en dur
@@ -548,182 +711,158 @@ for k in val_ds.indices:
         #    subject="fsaverage"
         # )
 
-        # compute the diverse inverse solutions
-        for method in methods:
-            if method == "gt" : 
-                j_hat = j_unscaled
-            # compute inverse solution
-            elif method in linear_methods:
-                lambda2 = 1.0 / (args.eeg_snr**2)
-                inv_op = mne.minimum_norm.make_inverse_operator(
-                    info=eeg.info,
-                    forward=fwd_regions,
-                    noise_cov=noise_cov,
-                    loose=0,
-                    depth=0,
-                    verbose=False
-                )
-                stc_hat = mne.minimum_norm.apply_inverse_raw(
-                    raw=eeg, inverse_operator=inv_op, lambda2=lambda2, method=method, verbose=False
-                )
-
-                j_hat = torch.from_numpy(stc_hat.data)
-
-            elif method == "cnn_1d":
-                with torch.no_grad():
-                    j_hat = cnn.model(M.unsqueeze(0)).squeeze()
-                if cnn1d_params["loss"] == "cosine":
-                    j_hat = utl.gfp_scaling(
-                        M_unscaled,
-                        j_hat,
-                        torch.from_numpy(head_model.fwd["sol"]["data"]),
-                    )
-                else :#if cnn1d_params["post_scale"] == "amp":
-                    #if args.scaler == "eeg_max":
-                    j_hat = j_hat * val_ds.dataset.max_src[k]
-                #else:
-                #    pass
-
-            elif method == "lstm":
-                with torch.no_grad():
-                    j_hat = lstm(M.unsqueeze(0)).squeeze()
-                if lstm_params["loss"] == "cosine":
-                    j_hat = utl.gfp_scaling(
-                        M_unscaled,
-                        j_hat,
-                        torch.from_numpy(head_model.fwd["sol"]["data"]),
-                    )  # * esi_datamodule.train_scaler.maxs[k]
-                else : #if lstm_params["post_scale"] == "amp":
-                    #if args.scaler == "eeg_max":
-                    j_hat = j_hat * val_ds.dataset.max_src[k]
-
-            elif method == "deep_sif":
-                with torch.no_grad():
-                    j_hat = deep_sif(M.unsqueeze(0)).squeeze()
-                if deep_sif_params["loss"] == "cosine":
-                    j_hat = utl.gfp_scaling(
-                        M_unscaled,
-                        j_hat,
-                        torch.from_numpy(head_model.fwd["sol"]["data"]),
-                    )  # * esi_datamodule.train_scaler.maxs[k]
-                else : #if deep_sif_params["post_scale"] == "amp":
-                    #if args.scaler == "eeg_max":
-                    j_hat = j_hat * val_ds.dataset.max_src[k]
-
-            else:
-                sys.exit(f"unrecognized method {method}")
-
-            le = 0
-            te = 0
-            nmse = 0
-            auc_val = 0
-            seeds_hat = []
-            ## check for overlap ------ @TODO : fix ok for 2 sources, not for more
-            
-            ## ici il y a un distinction à faire selon les jeux de données
-            if args.eval_simu_type.lower() == "sereega":
-                seeds = val_ds.dataset.md_dict[md_keys[k]]["seeds"]
-                if type(seeds) is int:
-                    seeds = [seeds]
-            else:
-                seeds = list(val_ds.dataset.dataset_meta["selected_region"][k][:, 0])
-                seeds = [s.astype(int) for s in seeds]
-                if type(seeds) is int:
-                    seeds = [seeds]
-                
-            patches = [ [] for _ in range(len(seeds)) ]
-            if args.eval_simu_type.lower() == "nmm" :
-                raw_lb = val_ds.dataset.dataset_meta["selected_region"][k].astype(
-                    int
-                )
-                for kk in range(len(seeds)) : 
-                    curr_lb = utl.get_patch(order=3, idx=seeds[kk], neighbors=neighbors)
-                    #curr_lb = raw_lb[kk, np.logical_not(ispadding(raw_lb[kk]))]
-                    patches[kk] = curr_lb
-            else : 
-                for kk in range(len(seeds)) : 
-                    patches[kk] = val_ds.dataset.md_dict[md_keys[k]]['act_src'][f'patch_{kk+1}'] 
-            inter = list( 
-                set(patches[0]).intersection(patches[1])
+    # compute the diverse inverse solutions
+    for method in methods:
+        if method == "gt":
+            j_hat = j_unscaled
+        # compute inverse solution
+        elif method in linear_methods:
+            lambda2 = 1.0 / (args.eeg_snr**2)
+            inv_op = mne.minimum_norm.make_inverse_operator(
+                info=eeg.info,
+                forward=fwd_regions,
+                noise_cov=noise_cov,
+                loose=0,
+                depth=0,
+                verbose=False,
             )
-            if len(inter)>0 : # for overlapping regions : only keep seed with max activity
+            stc_hat = mne.minimum_norm.apply_inverse_raw(
+                raw=eeg,
+                inverse_operator=inv_op,
+                lambda2=lambda2,
+                method=method,
+                verbose=False,
+            )
+
+            j_hat = torch.from_numpy(stc_hat.data)
+
+        elif method == "cnn_1d":
+            with torch.no_grad():
+                j_hat = cnn.model(M.unsqueeze(0)).squeeze()
+            if cnn1d_params["loss"] == "cosine":
+                j_hat = utl.gfp_scaling(
+                    M_unscaled,
+                    j_hat,
+                    torch.from_numpy(fwd),
+                )
+            else:  # amplitude rescale
+                j_hat = j_hat * val_ds.dataset.max_src[k]
+
+        elif method == "lstm":
+            with torch.no_grad():
+                j_hat = lstm(M.unsqueeze(0)).squeeze()
+            if lstm_params["loss"] == "cosine":
+                j_hat = utl.gfp_scaling(
+                    M_unscaled,
+                    j_hat,
+                    torch.from_numpy(fwd),
+                )  # * esi_datamodule.train_scaler.maxs[k]
+            else:  # amplitude rescale
+                j_hat = j_hat * val_ds.dataset.max_src[k]
+
+        elif method == "deep_sif":
+            with torch.no_grad():
+                j_hat = deep_sif(M.unsqueeze(0)).squeeze()
+            if deep_sif_params["loss"] == "cosine":
+                j_hat = utl.gfp_scaling(
+                    M_unscaled,
+                    j_hat,
+                    torch.from_numpy(fwd),
+                )  # * esi_datamodule.train_scaler.maxs[k]
+            else:  # amplitude rescale
+                j_hat = j_hat * val_ds.dataset.max_src[k]
+
+        else:
+            sys.exit(f"unrecognized method {method}")
+
+        # -------------------- Metrics for this method -------------------- #
+        le = 0
+        te = 0
+        nmse = 0
+        auc_val = 0
+        seeds_hat = []
+
+        # dataset-dependent seeds / patches
+        if args.eval_simu_type.lower() == "sereega":
+            seeds = val_ds.dataset.md_dict[md_keys[k]]["seeds"]
+            if type(seeds) is int:
+                seeds = [seeds]
+        else:
+            seeds = list(val_ds.dataset.dataset_meta["selected_region"][k][:, 0])
+            seeds = [s.astype(int) for s in seeds]
+            if type(seeds) is int:
+                seeds = [seeds]
+
+        patches = [[] for _ in range(len(seeds))]
+        if args.eval_simu_type.lower() == "nmm":
+            for kk in range(len(seeds)):
+                patches[kk] = utl.get_patch(order=3, idx=seeds[kk], neighbors=neighbors)
+        else:
+            for kk in range(len(seeds)):
+                patches[kk] = val_ds.dataset.md_dict[md_keys[k]]["act_src"][f"patch_{kk+1}"]
+
+        # Overlap handling (only meaningful if there are >= 2 sources)
+        if len(patches) >= 2:
+            inter = list(set(patches[0]).intersection(patches[1]))
+            if len(inter) > 0:
                 overlapping_regions += 1
-                to_keep = torch.argmax( torch.Tensor([j[seeds[0], :].abs().max(), j[seeds[1], :].abs().max() ]) )
-                seeds = [ seeds[to_keep] ]
-            ## ----------------------
-            act_src = [ s for l in patches for s in l ]
-            # compute metrics -----------------------------------------------------------------
-            for kk in range(len(seeds)) :
-                s = seeds[kk]
-                other_sources = np.setdiff1d(
-                    act_src, patches[kk]
+                to_keep = torch.argmax(
+                    torch.Tensor(
+                        [j[seeds[0], :].abs().max(), j[seeds[1], :].abs().max()]
+                    )
                 )
-                t_eval_gt = torch.argmax(j[s, :].abs())
+                seeds = [seeds[to_keep]]
+                patches = [patches[to_keep]]
 
-                # find estimated seed, in a neighboring area
-                eval_zone = utl.get_patch(order=5, idx=s, neighbors=neighbors)
-                ## remove sources from other patches of the eval zone (case of close sources regions) ##
-                eval_zone = np.setdiff1d(eval_zone, other_sources)
+        act_src = [s for l in patches for s in l]
 
-                # find estimated seed, in a neighboring area
-                eval_zone = utl.get_patch(order=2, idx=s, neighbors=neighbors)
-                s_hat = eval_zone[torch.argmax(j_hat[eval_zone, t_eval_gt].abs())]
+        for kk in range(len(seeds)):
+            s = seeds[kk]
+            other_sources = np.setdiff1d(act_src, patches[kk])
+            t_eval_gt = torch.argmax(j[s, :].abs())
 
-                t_eval_pred = torch.argmax(j_hat[s_hat, :].abs())
+            # find estimated seed in a neighboring area
+            eval_zone = utl.get_patch(order=5, idx=s, neighbors=neighbors)
+            eval_zone = np.setdiff1d(eval_zone, other_sources)
+            eval_zone = utl.get_patch(order=2, idx=s, neighbors=neighbors)
 
-                le += torch.sqrt(((spos[s, :] - spos[s_hat, :]) ** 2).sum())
-                te += np.abs(t_vec[t_eval_gt] - t_vec[t_eval_pred])
-                auc_val += met.auc_t(
-                    j_unscaled, j_hat, t_eval_gt, thresh=True, act_thresh=0.0
-                )  # probablement peut mieux faire
+            s_hat = eval_zone[torch.argmax(j_hat[eval_zone, t_eval_gt].abs())]
+            t_eval_pred = torch.argmax(j_hat[s_hat, :].abs())
 
-                #nmse += met.nmse_t_fn(j_unscaled, j_hat, t_eval_gt)
-                nmse_tmp = ( (
-                    j_unscaled[:,t_eval_gt] / j_unscaled[:,t_eval_gt].abs().max() - j_hat[:,t_eval_gt] / j_hat[:,t_eval_gt].abs().max() 
-                    )**2 ).mean()
-                nmse += nmse_tmp
-                
-                seeds_hat.append(s_hat)
+            le += torch.sqrt(((spos[s, :] - spos[s_hat, :]) ** 2).sum())
+            te += np.abs(t_vec[t_eval_gt] - t_vec[t_eval_pred])
+            auc_val += met.auc_t(j_unscaled, j_hat, t_eval_gt, thresh=True, act_thresh=0.0)
 
-            le = le / len(seeds)
-            te = te / len(seeds)
-            nmse = nmse / len(seeds)
-            auc_val = auc_val / len(seeds)
-            tmaxs_pred = torch.argmax(j_hat[seeds_hat, :].abs(), dim=1)
-            # time error (error on the instant of the max. activity):
-            time_error_dict[method][c] = te
-            # print(f"time error: {time_error*1e3} [ms]")
+            nmse_tmp = (
+                (
+                    j_unscaled[:, t_eval_gt] / j_unscaled[:, t_eval_gt].abs().max()
+                    - j_hat[:, t_eval_gt] / j_hat[:, t_eval_gt].abs().max()
+                )
+                ** 2
+            ).mean()
+            nmse += nmse_tmp
 
-            # localisation error
-            loc_error_dict[method][c] = le
-            # print(f"localisation error: {loc_error*1e3} [mm]")
+            seeds_hat.append(s_hat)
 
-            # instant nMSE:
-            nmse_dict[method][c] = nmse
-            # print(f"nmse at instant of max activity: {nmse_t:.4f}")
+        le = le / len(seeds)
+        te = te / len(seeds)
+        nmse = nmse / len(seeds)
+        auc_val = auc_val / len(seeds)
 
-            # PSNR
-            psnr_dict[method][c] = psnr(
-                (j_unscaled / j_unscaled.abs().max()).numpy(),
-                (j_hat / j_hat.abs().max()).numpy(),
-                data_range=(
-                    (j_unscaled / j_unscaled.abs().max()).min()
-                    - (j_hat / j_hat.abs().max()).max()
-                ),
-            )
-            # print(f"psnr for total source distrib: {psnr_val:.4f} [dB]")
+        time_error_dict[method][c] = te
+        loc_error_dict[method][c] = le
+        nmse_dict[method][c] = nmse
+        auc_dict[method][c] = auc_val
 
-            # AUC
-            # act_src = esi_datamodule.val_ds.act_src[k]
-            auc_dict[method][c] = auc_val
-            # print(f"auc: {auc_val:.4f}")
+        psnr_dict[method][c] = psnr(
+            (j_unscaled / j_unscaled.abs().max()).numpy(),
+            (j_hat / j_hat.abs().max()).numpy(),
+            data_range=(
+                (j_unscaled / j_unscaled.abs().max()).min()
+                - (j_hat / j_hat.abs().max()).max()
+            ),
+        )
 
-            # change plots to visu. multiple sources
-            idx_max_gt = seeds[0]
-            idx_max_pred = seeds_hat[0]
-
-    else:
-        noise_only_eeg_data.append(c)
     c += 1
 
     if c%100 == 0 : 
