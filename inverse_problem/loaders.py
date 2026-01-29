@@ -89,6 +89,7 @@ class EsiDatasetds_new(Dataset):
                 self.root_simu, self.ori, self.electrode_montage, self.source_space, "simu"
             )
         )
+        
 
         (
             self.ids,
@@ -96,6 +97,9 @@ class EsiDatasetds_new(Dataset):
             self.src_dict,
             self.match_dict,
         ) = utl_data.get_matching_info(data_folder_name, self.general_config_dict, self.root_simu)
+        
+        #length of ids
+        # print("Ids" , len(self.ids))
 
         # n_times = self.general_config_dict["rec_info"]["n_times"]
         self.max_eeg = torch.zeros((self.to_load, 1))

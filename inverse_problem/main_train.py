@@ -56,6 +56,18 @@ parser.add_argument(
     help="Subject name when using `simulation/<subject>/...` folder layout",
 )
 parser.add_argument(
+    "-data_layout",
+    type=str,
+    default="auto",
+    choices=["auto", "flat", "simulation"],
+    help=(
+        "Where to load simulations from. "
+        "'flat' expects <root>/<ori>/<montage>/<src>/simu/<simu_name>. "
+        "'simulation' expects <root>/simulation/<subject>/<ori>/<montage>/<src>/simu/<simu_name>. "
+        "'auto' picks 'simulation' if that folder exists, else 'flat'."
+    ),
+)
+parser.add_argument(
     "-simu_type", type=str, help="type of simulation used (NMM or SEREEGA)"
 )
 parser.add_argument("-spikes_folder", type=str, default="nmm_spikes_nov23", help="folder with spikes for NMM based simulations")
@@ -110,7 +122,7 @@ parser.add_argument(
 )
 
 parser.add_argument(
-    "-n_epochs", "--ep", default=5, type=int, help="number of epochs for training"
+    "-n_epochs", "--ep", default=25, type=int, help="number of epochs for training"
 )
 parser.add_argument(
     "-no_early_stop", action="store_false", help="do not use early stopping"
@@ -145,10 +157,15 @@ root_simu_path = Path(root_simu)
 # Support both layouts:
 #   A) <root>/<ori>/<montage>/<src>/simu/<simu_name>
 #   B) <root>/simulation/<subject>/<ori>/<montage>/<src>/simu/<simu_name>
-if (root_simu_path / "simulation" / args.subject_name).is_dir():
-    root_base = root_simu_path / "simulation" / args.subject_name
-else:
+if args.data_layout == "flat":
     root_base = root_simu_path
+elif args.data_layout == "simulation":
+    root_base = root_simu_path / "simulation" / args.subject_name
+else:  # auto
+    if (root_simu_path / "simulation" / args.subject_name).is_dir():
+        root_base = root_simu_path / "simulation" / args.subject_name
+    else:
+        root_base = root_simu_path
 
 simu_path = str(
     root_base
@@ -197,10 +214,16 @@ def _load_leadfield_mat(mat_path: str):
 
 
 # --------------------------- Leadfield loading --------------------------- #
+repo_root = Path(__file__).resolve().parents[1]
+repo_default_fsav994_lf = repo_root / "anatomy" / "leadfield_75_20k.mat"
+
 if args.leadfield_mat:
     fwd = _load_leadfield_mat(args.leadfield_mat)
 elif args.source_space == "fsav_994" and os.path.isfile(f"{model_path}/LF_fsav_994.mat"):
     fwd = loadmat(f"{model_path}/LF_fsav_994.mat")["G"]
+elif args.source_space == "fsav_994" and repo_default_fsav994_lf.is_file():
+    # Common lightweight setup: use the repo-provided 75x994 leadfield without requiring a full model folder.
+    fwd = _load_leadfield_mat(str(repo_default_fsav994_lf))
 else:
     electrode_space_obj = HeadModel.ElectrodeSpace(folders, general_config_dict)
     head_model = HeadModel.HeadModel(
@@ -217,7 +240,7 @@ if args.simu_type.upper() == "NMM":
             "NMM spike simulations require the 994-region source space. "
             "Please run with `-source_space fsav_994` (and a matching leadfield)."
         )
-    spikes_data_path = f"{root_simu}/{args.orientation}/{args.electrode_montage}/{args.source_space}/simu/{args.spikes_folder}"
+    spikes_data_path = f"{str(root_base)}/{args.orientation}/{args.electrode_montage}/{args.source_space}/simu/{args.spikes_folder}"
     dataset_meta_path = f"{simu_path}/{args.simu_name}.mat"
 
     ds_dataset = ModSpikeEEGBuild(
@@ -237,7 +260,7 @@ elif args.simu_type.upper() == "SEREEGA":
     config_file = f"{simu_path}/{args.simu_name}{args.source_space}_config.json"
 
     ds_dataset = EsiDatasetds_new(
-        root_simu,
+        str(root_base),
         config_file,
         args.simu_name,
         args.source_space,

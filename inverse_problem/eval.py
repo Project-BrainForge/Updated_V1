@@ -652,7 +652,7 @@ noise_cov = mne.compute_raw_covariance(raw_noise)
 
 noise_only_eeg_data = []
 #################################
-if args.eval_simu_type == "sereega":
+if args.eval_simu_type.lower() == "sereega":
     md_keys = [k for k, _ in val_ds.dataset.md_dict.items()]
 c = 0
 nf=0
@@ -694,7 +694,7 @@ for k in val_ds.indices:
         eeg = None
 
     ## ici il y a un distinction à faire selon les jeux de données
-    if args.eval_simu_type == "sereega":
+    if args.eval_simu_type.lower() == "sereega":
         seeds = val_ds.dataset.md_dict[md_keys[k]]["seeds"]
         if type(seeds) is int:
             seeds = [seeds]
