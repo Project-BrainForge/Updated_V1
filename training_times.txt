@@ -1,0 +1,4 @@
+model : simu_SEREEGA_srcspace_fsav_994_model_DEEPSIF_trainset_80_epochs_20_loss_cosine_norm_linear - training time : 2728.605s
+-------------------------------------------------------------
+model : simu_SEREEGA_srcspace_fsav_994_model_VIT_trainset_80_epochs_25_loss_cosine_norm_linear - training time : 1598.786s
+-------------------------------------------------------------

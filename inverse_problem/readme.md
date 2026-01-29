@@ -24,7 +24,10 @@ Example of command for evaluation :
 ```
 python eval.py _dps_sereega_2src_om3_test_ sereega -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -spikes_folder nmm_spikes_nov23_test -eeg_snr 5 -to_load 2000 -per_valid 1 -sfolder train_size_impact_res -train_simu_name _dps_sereega_2src_om3_train_big_ -train_simu_type sereega -n_train_samples 3200 -train_sfolder train_size_impact
 
-python inverse_problem/main_train.py mes_debug_python -root_simu D:/fyp/stESI_pub -results_path D:/fyp/stESI_pub/inverse_problem/results -simu_type sereega  -source_space fsav_994 -electrode_montage standard_1020 -orientation constrained -spikes_folder nmm_spikes_nov23 -model DEEPSIF -to_load 100 -per_valid 0.2 -n_times 500 -eeg_snr 5 -loss cosine -scaler linear -deepsif_temporal_input_size 500 
+python inverse_problem/main_train.py mes_debug_python -root_simu D:/fyp/stESI_pub -results_path D:/fyp/stESI_pub/inverse_problem/results -simu_type sereega  -source_space fsav_994 -electrode_montage standard_1020 -orientation constrained -spikes_folder nmm_spikes_nov23 -model DEEPSIF -to_load 100 -per_valid 0.2 -n_times 500 -eeg_snr 5 -loss cosine -scaler linear -deepsif_temporal_input_size 500
+
+
+python inverse_problem/main_train.py mes_debug_python -root_simu D:/fyp/stESI_pub -results_path D:/fyp/stESI_pub/inverse_problem/results -simu_type SEREEGA -source_space fsav_994 -electrode_montage standard_1020 -orientation constrained -model VIT -to_load 100 -per_valid 0.2 -n_times 500 -eeg_snr 5 -loss cosine -scaler linear -vit_embed_dim 256 -vit_depth 6 -vit_heads 8 -vit_mlp_dim 512 -vit_dropout 0.1 -leadfield_mat D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat
 ```
 
 
@@ -40,3 +43,26 @@ python eval_real.py mes_debug_python -root_simu "C:/Users/pasin/Documents/Data/s
 
 
 python eval.py mes_debug_python -eval_simu_type SEREEGA -root_simu "C:/Users/pasin/Documents/Data/simulation/fsaverage" -results_path "D:/fyp/stESI_pub/inverse_problem/results" -subject_name fsaverage -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -eeg_snr 5 -to_load 100 -per_valid 1 -mets deepsif -leadfield_mat "D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat" -train_run_dir "D:\fyp\stESI_pub\inverse_problem\results\mes_debug_pythonfsav_994_\trainings\simu_sereega_srcspace_fsav_994_model_DEEPSIF_trainset_80_epochs_5_loss_cosine_norm_linear"
+
+
+
+
+# EVAL REAL
+
+python eval_real_cnn1d.py mes_debug_python -root_simu "C:/Users/pasin/Documents/Data/simulation/fsaverage" -subject_name fsaverage -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -n_times 500 -to_load 20 -leadfield_mat "D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat" -train_run_dir "D:\fyp\stESI_pub\inverse_problem\results\mes_debug_pythonfsav_994_\trainings\simu_SEREEGA_srcspace_fsav_994_model_1dcnn_trainset_80_epochs_100_loss_cosine_norm_linear" -inter_layer 4096 -kernel_size 5 -out_mat "D:/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/eval_real_all_out_cnn1d.mat"
+
+python eval_real_lstm.py mes_debug_python -root_simu "C:/Users/pasin/Documents/Data/simulation/fsaverage" -subject_name fsaverage -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -n_times 500 -to_load 20 -leadfield_mat "D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat" -train_run_dir "D:\fyp\stESI_pub\inverse_problem\results\mes_debug_pythonfsav_994_\trainings\simu_SEREEGA_srcspace_fsav_994_model_LSTM_trainset_80_epochs_100_loss_cosine_norm_linear" -hidden_size 85 -out_mat "D:/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/eval_real_all_out_lstm.mat"
+
+python eval_real_vit.py mes_debug_python -root_simu "C:/Users/pasin/Documents/Data/simulation/fsaverage" -subject_name fsaverage -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -n_times 500 -to_load 100 -leadfield_mat "D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat" -train_run_dir "D:\fyp\stESI_pub\inverse_problem\results\mes_debug_pythonfsav_994_\trainings\simu_SEREEGA_srcspace_fsav_994_model_VIT_trainset_80_epochs_5_loss_cosine_norm_linear" -vit_embed_dim 256 -vit_depth 6 -vit_heads 8 -vit_mlp_dim 512 -vit_dropout 0.1 -out_mat "D:/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/eval_real_all_out_vit.mat"
+
+
+
+
+
+# VM code
+
+
+python inverse_problem/main_train.py mes_debug_python -root_simu $(pwd) -results_path inverse_problem/results -simu_type SEREEGA -source_space fsav_994 -electrode_montage standard_1020 -orientation constrained -model VIT -to_load 100 -per_valid 0.2 -n_times 500 -eeg_snr 5 -loss cosine -scaler linear -vit_embed_dim 256 -vit_depth 6 -vit_heads 8 -vit_mlp_dim 512 -vit_dropout 0.1 -leadfield_mat anatomy/leadfield_75_20k.mat
+
+
+pm2 start python --name deepSIF-vit --no-autorestart -- inverse_problem/main_train.py mes_debug_python -root_simu $(pwd) -results_path inverse_problem/results -simu_type SEREEGA -source_space fsav_994 -electrode_montage standard_1020 -orientation constrained -model VIT -to_load 100 -per_valid 0.2 -n_times 500 -eeg_snr 5 -loss cosine -scaler linear -vit_embed_dim 256 -vit_depth 6 -vit_heads 8 -vit_mlp_dim 512 -vit_dropout 0.1 -leadfield_mat anatomy/leadfield_75_20k.mat -n_epochs 100
