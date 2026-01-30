@@ -31,3 +31,12 @@ venv/
 
 *.pyc 
 *.npy
+
+
+brain-viz-app/node_modules/
+brain-viz-app/.next/
+
+
+real_data/
+
+brain-viz-app/
