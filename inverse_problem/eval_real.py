@@ -17,7 +17,8 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
-from typing import Dict, List, Tuple
+import re
+from typing import List
 
 import numpy as np
 import torch
@@ -122,6 +123,55 @@ def _load_eeg_matrix(path: str, n_times: int) -> np.ndarray:
     return eeg
 
 
+def _natural_key(p: Path) -> tuple:
+    # Sort paths like eeg_and_src_data_2.mat before eeg_and_src_data_10.mat
+    m = re.search(r"(\d+)(?!.*\d)", p.stem)
+    if m:
+        return (p.stem[: m.start()], int(m.group(1)), p.suffix)
+    return (p.stem, -1, p.suffix)
+
+
+def _iter_real_mat_paths(real_data_dir: str, pattern: str) -> List[Path]:
+    d = Path(real_data_dir)
+    if not d.exists():
+        raise FileNotFoundError(f"real_data_dir does not exist: {real_data_dir}")
+    if d.is_file():
+        # allow pointing directly at a single .mat file
+        return [d]
+    mats = sorted(d.glob(pattern), key=_natural_key)
+    if not mats:
+        raise FileNotFoundError(
+            f"No .mat files found in {real_data_dir} matching pattern {pattern!r}"
+        )
+    return mats
+
+
+def _load_real_eeg_from_mat(mat_path: str, n_times: int) -> np.ndarray:
+    """
+    Loads `eeg_data` from a mat file saved like:
+      savemat(..., {"eeg_data": eeg_data, "src_data": src_data})
+    Returns EEG as (n_electrodes, n_times) float32.
+    """
+    m = loadmat(mat_path)
+    if "eeg_data" not in m:
+        raise KeyError(f"Missing key 'eeg_data' in {mat_path}. Keys={list(m.keys())}")
+    eeg = np.asarray(m["eeg_data"], dtype=np.float32).squeeze()
+    if eeg.ndim != 2:
+        raise ValueError(f"Expected eeg_data to be 2D in {mat_path}, got shape={eeg.shape}")
+
+    # Handle possible transpose (T,E) vs (E,T)
+    if eeg.shape[1] != n_times and eeg.shape[0] == n_times:
+        eeg = eeg.T
+
+    if eeg.shape[1] < n_times:
+        pad = np.zeros((eeg.shape[0], n_times - eeg.shape[1]), dtype=eeg.dtype)
+        eeg = np.concatenate([eeg, pad], axis=1)
+    elif eeg.shape[1] > n_times:
+        eeg = eeg[:, :n_times]
+
+    return eeg
+
+
 def main() -> None:
     seed_everything(0)
 
@@ -130,7 +180,7 @@ def main() -> None:
     parser.add_argument(
         "-root_simu",
         type=str,
-        required=True,
+        required=False,
         help="Simulation root. Either the subject folder or repo root containing `simulation/<subject>`",
     )
     parser.add_argument(
@@ -144,6 +194,21 @@ def main() -> None:
     parser.add_argument("-source_space", type=str, default="fsav_994")
     parser.add_argument("-n_times", type=int, default=500)
     parser.add_argument("-to_load", type=int, default=-1, help="Limit number of samples (<=0 means all)")
+    parser.add_argument(
+        "-real_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "If set, load EEG from .mat files in this folder (expects key 'eeg_data') "
+            "instead of using the simulation folder match JSON."
+        ),
+    )
+    parser.add_argument(
+        "-real_data_glob",
+        type=str,
+        default="eeg_and_src_data_*.mat",
+        help="Glob pattern under -real_data_dir (ignored if -real_data_dir is a file).",
+    )
     parser.add_argument(
         "-leadfield_mat",
         type=str,
@@ -198,36 +263,47 @@ def main() -> None:
     if n_sources != 994:
         print(f"Warning: expected 994 sources; got {n_sources}")
 
-    # Resolve simulation folder and match json
-    root_base = _resolve_root_base(Path(args.root_simu), args.subject_name)
-    data_folder_name = os.path.normpath(
-        os.path.join(
-            str(root_base),
-            args.orientation,
-            args.electrode_montage,
-            args.source_space,
-            "simu",
-        )
-    )
-    general_cfg = _build_general_config(
-        simu_name=args.simu_name,
-        orientation=args.orientation,
-        electrode_montage=args.electrode_montage,
-        source_space=args.source_space,
-        n_times=args.n_times,
-        n_sources=n_sources,
-        n_electrodes=n_electrodes,
-    )
-    ids, eeg_dict, _, _ = get_matching_info(
-        data_folder_name=data_folder_name,
-        general_config_dict=general_cfg,
-        root_simu=str(root_base),
-    )
+    # Data source: either real_data mats or simulation matching JSON
+    use_real_mats = args.real_data_dir is not None
+    if use_real_mats:
+        mat_paths = _iter_real_mat_paths(args.real_data_dir, args.real_data_glob)
+        if args.to_load and args.to_load > 0:
+            mat_paths = mat_paths[: args.to_load]
+        n_samples = len(mat_paths)
+        print(f"Loading {n_samples} EEG samples from real_data mats")
+    else:
+        if not args.root_simu:
+            parser.error("Either provide -root_simu (simulation mode) or -real_data_dir (real_data mode).")
 
-    if args.to_load and args.to_load > 0:
-        ids = ids[: args.to_load]
-    n_samples = len(ids)
-    print(f"Loading {n_samples} EEG samples")
+        root_base = _resolve_root_base(Path(args.root_simu), args.subject_name)
+        data_folder_name = os.path.normpath(
+            os.path.join(
+                str(root_base),
+                args.orientation,
+                args.electrode_montage,
+                args.source_space,
+                "simu",
+            )
+        )
+        general_cfg = _build_general_config(
+            simu_name=args.simu_name,
+            orientation=args.orientation,
+            electrode_montage=args.electrode_montage,
+            source_space=args.source_space,
+            n_times=args.n_times,
+            n_sources=n_sources,
+            n_electrodes=n_electrodes,
+        )
+        ids, eeg_dict, _, _ = get_matching_info(
+            data_folder_name=data_folder_name,
+            general_config_dict=general_cfg,
+            root_simu=str(root_base),
+        )
+
+        if args.to_load and args.to_load > 0:
+            ids = ids[: args.to_load]
+        n_samples = len(ids)
+        print(f"Loading {n_samples} EEG samples from simulation folder")
 
     # Load model weights
     weights_path = args.weights_path or _pick_model_path_from_run_dir(args.train_run_dir)
@@ -255,12 +331,21 @@ def main() -> None:
     bs = max(1, int(args.batch_size))
     for start in range(0, n_samples, bs):
         end = min(n_samples, start + bs)
-        batch_ids = ids[start:end]
+        batch_ids = mat_paths[start:end] if use_real_mats else ids[start:end]
         eeg_batch = []
         max_batch = []
         for _id in batch_ids:
-            eeg_path = eeg_dict[str(_id)]
-            eeg = _load_eeg_matrix(eeg_path, args.n_times)  # (E, T)
+            if use_real_mats:
+                eeg = _load_real_eeg_from_mat(str(_id), args.n_times)
+            else:
+                eeg_path = eeg_dict[str(_id)]
+                eeg = _load_eeg_matrix(eeg_path, args.n_times)  # (E, T)
+
+            if eeg.shape[0] != n_electrodes:
+                raise ValueError(
+                    f"EEG electrode count mismatch for {_id}: got {eeg.shape[0]} electrodes, "
+                    f"expected {n_electrodes} from leadfield"
+                )
             mx = float(np.max(np.abs(eeg))) if eeg.size else 0.0
             if mx == 0.0:
                 mx = 1.0
@@ -283,7 +368,10 @@ def main() -> None:
         # store as (B,T,S)
         J_np = J.detach().cpu().numpy().transpose(0, 2, 1).astype(np.float32)
         all_out[start:end, :, :] = J_np
-        all_ids.extend([str(x) for x in batch_ids])
+        if use_real_mats:
+            all_ids.extend([Path(x).name for x in batch_ids])
+        else:
+            all_ids.extend([str(x) for x in batch_ids])
         all_max_eeg[start:end] = np.asarray(max_batch, dtype=np.float32)
 
     out_mat = args.out_mat or os.path.join(args.train_run_dir, "eval_real_all_out.mat")
