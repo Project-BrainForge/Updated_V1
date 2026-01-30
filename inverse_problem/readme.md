@@ -35,7 +35,7 @@ python eval.py mes_debug_python -eval_simu_type sereega -root_simu "C:/Users/pas
 
 
 
-python eval_real.py mes_debug_python -root_simu "C:/Users/pasin/Documents/Data/simulation/fsaverage" -subject_name fsaverage -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -n_times 500 -to_load 100 -leadfield_mat "D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat" -train_run_dir "D:\fyp\stESI_pub\inverse_problem\results\mes_debug_pythonfsav_994_\trainings\simu_sereega_srcspace_fsav_994_model_DEEPSIF_trainset_80_epochs_5_loss_cosine_norm_linear" -out_mat "D:/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/eval_real_all_out.mat"
+python eval_real_vit.py mes_debug_python -root_simu "C:/Users/pasin/Documents/Data/simulation/fsaverage" -subject_name fsaverage -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -n_times 500 -to_load 100 -leadfield_mat "D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat" -train_run_dir "D:\fyp\stESI_pub\inverse_problem\results\mes_debug_pythonfsav_994_\trainings\simu_sereega_srcspace_fsav_994_model_VIT_trainset_80_epochs_100_loss_cosine_norm_linear" -out_mat "D:/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/eval_real_all_out.mat"
 
 
 

@@ -31,3 +31,5 @@ venv/
 
 *.pyc 
 *.npy
+
+real_data/
