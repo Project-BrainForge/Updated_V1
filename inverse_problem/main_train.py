@@ -120,6 +120,37 @@ parser.add_argument("-vit_heads", type=int, default=8, help="EEGViT number of at
 parser.add_argument("-vit_mlp_dim", type=int, default=512, help="EEGViT feedforward dimension")
 parser.add_argument("-vit_dropout", type=float, default=0.1, help="EEGViT dropout")
 parser.add_argument(
+    "-st_embed_dim",
+    type=int,
+    default=256,
+    help="ST-CNN-Transformer embedding dimension (after spatial CNN)",
+)
+parser.add_argument(
+    "-st_depth", type=int, default=6, help="ST-CNN-Transformer number of Transformer layers"
+)
+parser.add_argument(
+    "-st_heads", type=int, default=8, help="ST-CNN-Transformer number of attention heads"
+)
+parser.add_argument(
+    "-st_mlp_dim",
+    type=int,
+    default=512,
+    help="ST-CNN-Transformer feedforward dimension",
+)
+parser.add_argument("-st_dropout", type=float, default=0.1, help="ST-CNN-Transformer dropout")
+parser.add_argument(
+    "-st_spatial_hidden",
+    type=int,
+    default=64,
+    help="Hidden channels of the spatial CNN encoder",
+)
+parser.add_argument(
+    "-st_spatial_kernel",
+    type=int,
+    default=5,
+    help="Kernel size of the spatial CNN (over electrodes)",
+)
+parser.add_argument(
     "-leadfield_mat",
     type=str,
     default=None,
@@ -368,6 +399,28 @@ elif args.model.upper() in ("VIT", "EEGVIT", "TRANSFORMER"):
         "num_heads": args.vit_heads,
         "mlp_dim": args.vit_mlp_dim,
         "dropout": args.vit_dropout,
+        "optimizer": torch.optim.Adam,
+        "lr": lr,
+        "criterion": crit,
+    }
+    model = net(**net_parameters)
+
+##------------------ Spatial-CNN + Temporal-Transformer ----------------##
+elif args.model.upper() in ("STCT", "CNNTRANSFORMER", "STCNNTRANSFORMER", "ST_CNN_TRANSFORMER"):
+    from models.st_cnn_transformer import STCNNTransformerpl as net
+
+    lr = 1e-3
+    net_parameters = {
+        "num_sensor": n_electrodes,
+        "num_source": n_sources,
+        "n_times": args.n_times,
+        "embed_dim": args.st_embed_dim,
+        "depth": args.st_depth,
+        "num_heads": args.st_heads,
+        "mlp_dim": args.st_mlp_dim,
+        "dropout": args.st_dropout,
+        "spatial_hidden_channels": args.st_spatial_hidden,
+        "spatial_kernel_size": args.st_spatial_kernel,
         "optimizer": torch.optim.Adam,
         "lr": lr,
         "criterion": crit,

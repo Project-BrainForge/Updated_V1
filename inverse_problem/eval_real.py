@@ -153,9 +153,9 @@ def _load_real_eeg_from_mat(mat_path: str, n_times: int) -> np.ndarray:
     Returns EEG as (n_electrodes, n_times) float32.
     """
     m = loadmat(mat_path)
-    if "eeg_data" not in m:
+    if "data" not in m:
         raise KeyError(f"Missing key 'eeg_data' in {mat_path}. Keys={list(m.keys())}")
-    eeg = np.asarray(m["eeg_data"], dtype=np.float32).squeeze()
+    eeg = np.asarray(m["data"], dtype=np.float32).squeeze()
     if eeg.ndim != 2:
         raise ValueError(f"Expected eeg_data to be 2D in {mat_path}, got shape={eeg.shape}")
 
@@ -317,7 +317,17 @@ def main() -> None:
         lr=1e-3,
         criterion=None,
     )
-    model.load_state_dict(torch.load(weights_path, map_location="cpu"))
+    state = torch.load(weights_path, map_location="cpu")
+    # Accept both:
+    # - LightningModule state_dict (keys like "model.spatial.fc11.weight")
+    # - Raw TemporalInverseNet state_dict (keys like "spatial.fc11.weight")
+    try:
+        model.load_state_dict(state, strict=True)
+    except RuntimeError:
+        if isinstance(state, dict) and any(k.startswith("spatial.") or k.startswith("temporal.") for k in state.keys()):
+            model.load_state_dict({f"model.{k}": v for k, v in state.items()}, strict=True)
+        else:
+            raise
     model.eval()
     model.to(device)
 

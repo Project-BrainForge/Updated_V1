@@ -1,8 +1,9 @@
 """
-Evaluate EEGViT (Transformer) on EEG-only data and export predictions (`all_out`).
+Evaluate ST-CNN-Transformer on EEG-only data and export predictions (`all_out`).
 
-Loads EEG files from a simulation folder (via the match JSON), runs a trained EEGViT model,
-and saves `all_out` to a .mat file with shape:
+Model: spatial CNN (over electrodes) + temporal Transformer (over time).
+
+Saves `all_out` to a .mat file with shape:
   (n_samples, n_times, n_sources)
 """
 
@@ -21,36 +22,28 @@ from pytorch_lightning import seed_everything
 
 from load_data.utl_data import load_eeg_data_from_file, get_matching_info
 from utils import utl
-from models.vit import EEGViTpl
-
-
-def _default_real_data_dir() -> str | None:
-    """
-    If the repo contains `real_data/` at the project root, use it by default.
-    This makes it easy to run eval on exported MATs without passing -real_data_dir.
-    """
-    try:
-        root = Path(__file__).resolve().parents[1]  # .../stESI_pub
-    except Exception:
-        return None
-    d = root / "real_data"
-    return str(d) if d.is_dir() else None
+from models.st_cnn_transformer import STCNNTransformerpl
 
 
 def _pick_model_path_from_run_dir(run_dir: str) -> str:
     trained_models_dir = os.path.join(run_dir, "trained_models")
     candidates = [
-        os.path.join(trained_models_dir, "VIT_model.pt"),
-        os.path.join(trained_models_dir, "vit_model.pt"),
-        os.path.join(trained_models_dir, "EEGVIT_model.pt"),
-        os.path.join(trained_models_dir, "eegvit_model.pt"),
-        os.path.join(trained_models_dir, "eeg_vit_model.pt"),
-        os.path.join(trained_models_dir, "TRANSFORMER_model.pt"),
+        os.path.join(trained_models_dir, "STCT_model.pt"),
+        os.path.join(trained_models_dir, "stct_model.pt"),
+        os.path.join(trained_models_dir, "STCNNTRANSFORMER_model.pt"),
+        os.path.join(trained_models_dir, "stcnntransformer_model.pt"),
+        os.path.join(trained_models_dir, "CNNTRANSFORMER_model.pt"),
+        os.path.join(trained_models_dir, "cnntransformer_model.pt"),
+        os.path.join(trained_models_dir, "ST_CNN_TRANSFORMER_model.pt"),
+        os.path.join(trained_models_dir, "st_cnn_transformer_model.pt"),
     ]
     for p in candidates:
         if os.path.exists(p):
             return p
-    raise FileNotFoundError(f"Could not locate EEGViT weights under: {trained_models_dir}")
+    raise FileNotFoundError(
+        f"Could not locate STCT weights under: {trained_models_dir}. "
+        "Pass -weights_path to specify the .pt file explicitly."
+    )
 
 
 def _load_leadfield_mat(mat_path: str) -> np.ndarray:
@@ -140,10 +133,8 @@ def _load_real_eeg_from_mat(mat_path: str, n_times: int) -> np.ndarray:
     eeg = np.asarray(m["eeg_data"], dtype=np.float32).squeeze()
     if eeg.ndim != 2:
         raise ValueError(f"Expected eeg_data to be 2D in {mat_path}, got shape={eeg.shape}")
-
     if eeg.shape[1] != n_times and eeg.shape[0] == n_times:
         eeg = eeg.T
-
     if eeg.shape[1] < n_times:
         pad = np.zeros((eeg.shape[0], n_times - eeg.shape[1]), dtype=eeg.dtype)
         eeg = np.concatenate([eeg, pad], axis=1)
@@ -156,7 +147,7 @@ def main() -> None:
     seed_everything(0)
 
     parser = argparse.ArgumentParser(fromfile_prefix_chars="@")
-    parser.add_argument("simu_name", type=str)
+    parser.add_argument("simu_name", type=str, help="Simulation name (folder name)")
     parser.add_argument("-root_simu", type=str, required=False)
     parser.add_argument("-subject_name", type=str, default="fsaverage")
     parser.add_argument("-orientation", type=str, default="constrained")
@@ -164,21 +155,8 @@ def main() -> None:
     parser.add_argument("-source_space", type=str, default="fsav_994")
     parser.add_argument("-n_times", type=int, default=500)
     parser.add_argument("-to_load", type=int, default=-1)
-    parser.add_argument(
-        "-real_data_dir",
-        type=str,
-        default=_default_real_data_dir(),
-        help=(
-            "If set, load EEG from .mat files in this folder (expects key 'eeg_data') "
-            "instead of using the simulation folder match JSON."
-        ),
-    )
-    parser.add_argument(
-        "-real_data_glob",
-        type=str,
-        default="eeg_and_src_data_*.mat",
-        help="Glob pattern under -real_data_dir (ignored if -real_data_dir is a file).",
-    )
+    parser.add_argument("-real_data_dir", type=str, default=None)
+    parser.add_argument("-real_data_glob", type=str, default="eeg_and_src_data_*.mat")
 
     parser.add_argument("-leadfield_mat", type=str, required=True)
     parser.add_argument("-train_run_dir", type=str, required=True)
@@ -193,11 +171,13 @@ def main() -> None:
         ),
     )
 
-    parser.add_argument("-vit_embed_dim", type=int, default=256)
-    parser.add_argument("-vit_depth", type=int, default=6)
-    parser.add_argument("-vit_heads", type=int, default=8)
-    parser.add_argument("-vit_mlp_dim", type=int, default=512)
-    parser.add_argument("-vit_dropout", type=float, default=0.1)
+    parser.add_argument("-st_embed_dim", type=int, default=256)
+    parser.add_argument("-st_depth", type=int, default=6)
+    parser.add_argument("-st_heads", type=int, default=8)
+    parser.add_argument("-st_mlp_dim", type=int, default=512)
+    parser.add_argument("-st_dropout", type=float, default=0.1)
+    parser.add_argument("-st_spatial_hidden", type=int, default=64)
+    parser.add_argument("-st_spatial_kernel", type=int, default=5)
 
     parser.add_argument("-batch_size", type=int, default=8)
     parser.add_argument("--no_gfp_scaling", action="store_true")
@@ -220,7 +200,9 @@ def main() -> None:
         print(f"Loading {n_samples} EEG samples from real_data mats")
     else:
         if not args.root_simu:
-            parser.error("Either provide -root_simu (simulation mode) or -real_data_dir (real_data mode).")
+            parser.error(
+                "Either provide -root_simu (simulation mode) or -real_data_dir (real_data mode)."
+            )
 
         root_base = _resolve_root_base(Path(args.root_simu), args.subject_name)
         data_folder_name = os.path.normpath(
@@ -249,13 +231,11 @@ def main() -> None:
         if args.to_load and args.to_load > 0:
             ids = ids[: args.to_load]
         n_samples = len(ids)
-        print(f"Loading {n_samples} EEG samples from simulation folder")
+        print(f"Loading {n_samples} EEG samples from simulation match JSON")
 
-    weights_path = None
     if args.ckpt_path:
-        weights_path = args.ckpt_path
         print(f"Loading checkpoint: {args.ckpt_path}")
-        model = EEGViTpl.load_from_checkpoint(
+        model = STCNNTransformerpl.load_from_checkpoint(
             args.ckpt_path,
             map_location=torch.device("cpu"),
         )
@@ -263,84 +243,55 @@ def main() -> None:
         weights_path = args.weights_path or _pick_model_path_from_run_dir(args.train_run_dir)
         print(f"Using weights: {weights_path}")
 
-        model = EEGViTpl(
+        model = STCNNTransformerpl(
             num_sensor=n_electrodes,
             num_source=n_sources,
             n_times=args.n_times,
-            embed_dim=args.vit_embed_dim,
-            depth=args.vit_depth,
-            num_heads=args.vit_heads,
-            mlp_dim=args.vit_mlp_dim,
-            dropout=args.vit_dropout,
+            embed_dim=args.st_embed_dim,
+            depth=args.st_depth,
+            num_heads=args.st_heads,
+            mlp_dim=args.st_mlp_dim,
+            dropout=args.st_dropout,
+            spatial_hidden_channels=args.st_spatial_hidden,
+            spatial_kernel_size=args.st_spatial_kernel,
             optimizer=None,
             lr=1e-3,
             criterion=None,
         )
-        model.load_state_dict(torch.load(weights_path, map_location="cpu"))
+        state = torch.load(weights_path, map_location="cpu")
+        model.load_state_dict(state)
+
     model.eval()
     model.to(device)
 
     all_out = np.zeros((n_samples, args.n_times, n_sources), dtype=np.float32)
-    all_ids: List[str] = []
-    all_max_eeg = np.zeros((n_samples,), dtype=np.float32)
 
-    G_torch = torch.from_numpy(fwd).to(device=device, dtype=torch.float32)
-    bs = max(1, int(args.batch_size))
-    for start in range(0, n_samples, bs):
-        end = min(n_samples, start + bs)
-        batch_ids = mat_paths[start:end] if use_real_mats else ids[start:end]
-        eeg_batch = []
-        max_batch = []
-        for _id in batch_ids:
+    with torch.no_grad():
+        for i in range(n_samples):
             if use_real_mats:
-                eeg = _load_real_eeg_from_mat(str(_id), args.n_times)
+                eeg = _load_real_eeg_from_mat(str(mat_paths[i]), args.n_times)
             else:
-                eeg_path = eeg_dict[str(_id)]
-                eeg = _load_eeg_matrix(eeg_path, args.n_times)  # (E, T)
+                eeg = _load_eeg_matrix(eeg_dict[ids[i]], args.n_times)
 
-            if eeg.shape[0] != n_electrodes:
-                raise ValueError(
-                    f"EEG electrode count mismatch for {_id}: got {eeg.shape[0]} electrodes, "
-                    f"expected {n_electrodes} from leadfield"
-                )
-            mx = float(np.max(np.abs(eeg))) if eeg.size else 0.0
-            if mx == 0.0:
-                mx = 1.0
-            eeg_batch.append(eeg / mx)
-            max_batch.append(mx)
+            # model expects (B,E,T)
+            eeg_t = torch.from_numpy(eeg).unsqueeze(0).to(device)
+            out = model(eeg_t).squeeze(0)  # (S,T)
 
-        X = torch.from_numpy(np.stack(eeg_batch, axis=0)).to(device=device, dtype=torch.float32)  # (B,E,T)
-        with torch.no_grad():
-            J = model(X)  # (B,S,T)
             if not args.no_gfp_scaling:
-                M_unscaled = X * torch.tensor(max_batch, device=device).view(-1, 1, 1)
-                J_scaled = []
-                for bi in range(J.shape[0]):
-                    J_scaled.append(utl.gfp_scaling(M_unscaled[bi], J[bi], G_torch))
-                J = torch.stack(J_scaled, dim=0)
+                out = utl.gfp_scaling(
+                    torch.from_numpy(eeg).to(out.device),
+                    out,
+                    torch.from_numpy(fwd).to(out.device),
+                )
 
-        J_np = J.detach().cpu().numpy().transpose(0, 2, 1).astype(np.float32)  # (B,T,S)
-        all_out[start:end, :, :] = J_np
-        if use_real_mats:
-            all_ids.extend([Path(x).name for x in batch_ids])
-        else:
-            all_ids.extend([str(x) for x in batch_ids])
-        all_max_eeg[start:end] = np.asarray(max_batch, dtype=np.float32)
+            all_out[i] = out.permute(1, 0).detach().cpu().numpy()  # (T,S)
 
-    out_mat = args.out_mat or os.path.join(args.train_run_dir, "eval_real_all_out.mat")
-    savemat(
-        out_mat,
-        {
-            "all_out": all_out,
-            "ids": np.array(all_ids, dtype=object),
-            "max_eeg": all_max_eeg,
-            "leadfield_path": str(args.leadfield_mat),
-            "weights_path": str(weights_path),
-            "ckpt_path": str(args.ckpt_path) if args.ckpt_path else "",
-        },
-    )
-    print(f"Saved: {out_mat}")
-    print(f"all_out shape: {all_out.shape}")
+            if (i + 1) % 50 == 0:
+                print(f"Processed {i+1}/{n_samples}")
+
+    out_path = args.out_mat or os.path.join(args.train_run_dir, "eval_real_all_out_stct.mat")
+    savemat(out_path, {"all_out": all_out})
+    print(f"Saved all_out to: {out_path}")
 
 
 if __name__ == "__main__":

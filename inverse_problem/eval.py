@@ -37,7 +37,7 @@ from utils import utl_inv as inv
 
 ############# METHODS ############################
 linear_methods = ["MNE", "sLORETA"]  # , "eLORETA"]
-nn_methods = ["cnn_1d", "lstm", "deep_sif", "eeg_vit"]
+nn_methods = ["cnn_1d", "lstm", "deep_sif", "eeg_vit", "stct"]
 methods = linear_methods + nn_methods
 
 # device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
@@ -72,6 +72,23 @@ parser.add_argument(
     type=str,
     default=None,
     help="Optional path to a .mat leadfield to use for evaluation (e.g. anatomy/leadfield_75_20k.mat).",
+)
+parser.add_argument("-st_embed_dim", type=int, default=256, help="STCT embedding dimension")
+parser.add_argument("-st_depth", type=int, default=6, help="STCT number of Transformer layers")
+parser.add_argument("-st_heads", type=int, default=8, help="STCT number of attention heads")
+parser.add_argument("-st_mlp_dim", type=int, default=512, help="STCT feedforward dimension")
+parser.add_argument("-st_dropout", type=float, default=0.1, help="STCT dropout")
+parser.add_argument(
+    "-st_spatial_hidden",
+    type=int,
+    default=64,
+    help="STCT spatial CNN hidden channels",
+)
+parser.add_argument(
+    "-st_spatial_kernel",
+    type=int,
+    default=5,
+    help="STCT spatial CNN kernel size (over electrodes)",
 )
 
 parser.add_argument("-spikes_folder", type=str, default="nmm_spikes_nov23", help="folder with spikes for NMM based simulations")
@@ -176,6 +193,8 @@ def _normalize_methods(method_list):
             normalized.append("cnn_1d")
         elif ml in ("vit", "eegvit", "eeg_vit", "transformer"):
             normalized.append("eeg_vit")
+        elif ml in ("stct", "cnntransformer", "stcnntransformer", "st_cnn_transformer"):
+            normalized.append("stct")
         else:
             normalized.append(m)
     return normalized
@@ -217,6 +236,15 @@ def _pick_model_path_from_run_dir(run_dir: str, method: str) -> str:
             os.path.join(trained_models_dir, "eeg_vit_model.pt"),
             os.path.join(trained_models_dir, "TRANSFORMER_model.pt"),
         ]
+    elif method == "stct":
+        candidates = [
+            os.path.join(trained_models_dir, "STCT_model.pt"),
+            os.path.join(trained_models_dir, "stct_model.pt"),
+            os.path.join(trained_models_dir, "STCNNTRANSFORMER_model.pt"),
+            os.path.join(trained_models_dir, "stcnntransformer_model.pt"),
+            os.path.join(trained_models_dir, "CNNTRANSFORMER_model.pt"),
+            os.path.join(trained_models_dir, "cnntransformer_model.pt"),
+        ]
 
     for p in candidates:
         if os.path.exists(p):
@@ -232,7 +260,7 @@ def _pick_model_path_from_run_dir(run_dir: str, method: str) -> str:
             return os.path.join(trained_models_dir, pt_files[0])
 
         # try a soft keyword match if multiple pt files exist
-        kw = {"cnn_1d": "cnn", "lstm": "lstm", "deep_sif": "sif", "eeg_vit": "vit"}.get(method, "")
+        kw = {"cnn_1d": "cnn", "lstm": "lstm", "deep_sif": "sif", "eeg_vit": "vit", "stct": "stct"}.get(method, "")
         if kw:
             for f in pt_files:
                 if kw in f.lower():
@@ -294,7 +322,6 @@ general_config_dict["simu_name"] = args.simu_name
 folders = FolderStructure(str(root_base), general_config_dict)
 source_space = HeadModel.SourceSpace(folders, general_config_dict)
 electrode_space = HeadModel.ElectrodeSpace(folders, general_config_dict)
-head_model = HeadModel.HeadModel(electrode_space, source_space, folders, "fsaverage")
 
 def _load_leadfield_mat(mat_path: str):
     m = loadmat(mat_path)
@@ -310,15 +337,48 @@ def _load_leadfield_mat(mat_path: str):
     raise KeyError(f"No leadfield matrix found in {mat_path}. Keys={list(m.keys())}")
 
 
+repo_root = Path(__file__).resolve().parents[1]  # .../stESI_pub
+repo_default_fsav994_lf = repo_root / "anatomy" / "leadfield_75_20k.mat"
+
 if args.leadfield_mat:
     fwd = _load_leadfield_mat(args.leadfield_mat)
-elif args.source_space == "fsav_994":
+elif args.source_space == "fsav_994" and os.path.isfile(f"{model_path}/LF_fsav_994.mat"):
     fwd = loadmat(f"{model_path}/LF_fsav_994.mat")["G"]
+elif args.source_space == "fsav_994" and repo_default_fsav994_lf.is_file():
+    fwd = _load_leadfield_mat(str(repo_default_fsav994_lf))
 else:
-    fwd = head_model.fwd["sol"]["data"]
+    raise FileNotFoundError(
+        "No leadfield available for evaluation. Provide `-leadfield_mat`, or make sure the model folder contains "
+        "`LF_fsav_994.mat` (for fsav_994)."
+    )
 
 # Ensure consistent dtype for torch matmul (avoid float64 from .mat files)
 fwd = np.asarray(fwd, dtype=np.float32)
+
+# Optional GFP scaling helper (used for cosine-trained NNs).
+_warned_gfp_mismatch = False
+
+
+def _maybe_gfp_scale(M_unscaled: torch.Tensor, j_hat: torch.Tensor) -> torch.Tensor:
+    """
+    Apply GFP scaling only if the leadfield matches the EEG channel count.
+    This prevents crashes when EEG is e.g. 75ch but leadfield is 90x994.
+    """
+    global _warned_gfp_mismatch
+    try:
+        lf_e, lf_s = int(fwd.shape[0]), int(fwd.shape[1])
+        if lf_e != int(M_unscaled.shape[0]) or lf_s != int(j_hat.shape[0]):
+            if not _warned_gfp_mismatch:
+                print(
+                    f"[WARN] Skipping GFP scaling due to shape mismatch: "
+                    f"leadfield={tuple(fwd.shape)} vs EEG={tuple(M_unscaled.shape)} vs J={tuple(j_hat.shape)}"
+                )
+                _warned_gfp_mismatch = True
+            return j_hat
+    except Exception:
+        return j_hat
+
+    return utl.gfp_scaling(M_unscaled, j_hat, torch.from_numpy(fwd))
 
 ## open neighbors file if it was already re-shaped
 if os.path.isfile(f"{folders.model_folder}/fs_cortex_neighbors_994.mat"):
@@ -350,12 +410,19 @@ fs = general_config_dict["rec_info"]["fs"]
 n_times = general_config_dict["rec_info"]["n_times"]
 t_vec = np.arange(0, n_times / fs, 1 / fs)
 spos = torch.from_numpy(source_space.positions)  # in meter
-mne_info = getattr(head_model.electrode_space, "info", None)
-if mne_info is None or getattr(mne_info, "nchan", None) != fwd.shape[0]:
-    ch_names = [f"EEG{c:03d}" for c in range(1, fwd.shape[0] + 1)]
-    mne_info = mne.create_info(ch_names=ch_names, sfreq=fs, ch_types="eeg", verbose=False)
+mne_info = None
+if USE_MNE_LINEAR:
+    mne_info = getattr(electrode_space, "info", None)
+    if mne_info is None or getattr(mne_info, "nchan", None) != fwd.shape[0]:
+        ch_names = [f"EEG{c:03d}" for c in range(1, fwd.shape[0] + 1)]
+        mne_info = mne.create_info(ch_names=ch_names, sfreq=fs, ch_types="eeg", verbose=False)
 
-### load the 2 source spaces and region mapping
+### region mapping (does not require MNE)
+region_mapping = loadmat(f"{folders.model_folder}/fs_cortex_20k_region_mapping.mat")["rm"][0]
+n_vertices = int(len(region_mapping))
+n_regs = int(len(np.unique(region_mapping)))
+
+### load the 2 source spaces (only if using linear methods)
 if USE_MNE_LINEAR:
     fwd_vertices = mne.read_forward_solution(
         f"{folders.model_folder}/fwd_verticesfsav_994-fwd.fif"
@@ -371,19 +438,9 @@ if USE_MNE_LINEAR:
     ## assign fwd_region the proper leadfield matrix values (summed version)
     fwd_regions["sol"]["data"] = fwd
 
-    region_mapping = loadmat(f"{folders.model_folder}/fs_cortex_20k_region_mapping.mat")[
-        "rm"
-    ][0]
-    n_vertices = fwd_vertices["nsource"]
-    n_regs = len(np.unique(region_mapping))
 else:
-    # For NN-only evaluation on regional source spaces (e.g. 994 regions),
-    # we never need to expand regions back to the 20k-vertex surface.
     fwd_vertices = None
     fwd_regions = None
-    region_mapping = None
-    n_vertices = fwd.shape[1]
-    n_regs = fwd.shape[1]
 ####################################################################
 ## load dataset
 if args.eval_simu_type.upper() == "NMM":
@@ -415,8 +472,18 @@ elif args.eval_simu_type.upper() == "SEREEGA":
 else:
     sys.exit("unknown simulation type (argument simu_type)")
 
-n_electrodes = fwd.shape[0]
-n_sources = fwd.shape[1]
+# Infer dimensions from the dataset (EEG can be 75ch while some leadfields are 90ch).
+eeg0, src0 = ds_dataset[0]
+n_electrodes = int(eeg0.shape[0])
+n_sources = int(src0.shape[0])
+
+if hasattr(fwd, "shape"):
+    lf_e, lf_s = int(fwd.shape[0]), int(fwd.shape[1])
+    if lf_s != n_sources:
+        print(
+            f"[WARN] Leadfield sources={lf_s} but dataset sources={n_sources}. "
+            "Make sure you are using the correct source space / leadfield."
+        )
 # split dataset
 _, val_ds = random_split(ds_dataset, [1 - args.per_valid, args.per_valid])
 val_dataloader = DataLoader(dataset=val_ds, batch_size=1, shuffle=False)
@@ -433,6 +500,7 @@ if args.net_from_file :
     lstm_params     = params_file["lstm"]
     deep_sif_params = params_file["deep_sif"]
     vit_params      = params_file.get("eeg_vit", deep_sif_params)
+    stct_params     = params_file.get("stct", vit_params)
 #if args.n_train_samples > 0 :
 #    cnn1d_params['n_train_samples'] = args.n_train_samples
 #    lstm_params['n_train_samples'] = args.n_train_samples
@@ -455,14 +523,26 @@ else :
         "n_train_samples" : args.n_train_samples,
         "loss" :args.train_loss,
         "norm" : args.scaler, 
-        "n_electrodes" : n_electrodes, 
-        "n_sources" : n_sources, 
+        "n_electrodes" : n_electrodes,
+        "n_sources" : n_sources,
         "hidden_size" : 85, 
         "temporal_input_size" : 500, 
     }
     cnn1d_params = train_params
     lstm_params = train_params
     deep_sif_params = train_params
+    vit_params = train_params
+    stct_params = {
+        **train_params,
+        "n_times": n_times,
+        "st_embed_dim": args.st_embed_dim,
+        "st_depth": args.st_depth,
+        "st_heads": args.st_heads,
+        "st_mlp_dim": args.st_mlp_dim,
+        "st_dropout": args.st_dropout,
+        "st_spatial_hidden": args.st_spatial_hidden,
+        "st_spatial_kernel": args.st_spatial_kernel,
+    }
     vit_params = train_params
 
 
@@ -490,7 +570,7 @@ if "cnn_1d" in methods:
 
     cnn_model_name = (
         f"simu_{args.train_simu_type}_"
-        f"srcspace_{head_model.source_space.src_sampling}"
+        f"srcspace_{source_space.src_sampling}"
         f"_model_1dcnn"
         f"_interlayer_{ cnn1d_params['inter_layer'] }"
         f"_trainset_{cnn1d_params['n_train_samples']}"
@@ -546,7 +626,7 @@ if "lstm" in methods:
 
     lstm_model_name = (
         f"simu_{args.train_simu_type}_"
-        f"srcspace_{head_model.source_space.src_sampling}"
+        f"srcspace_{source_space.src_sampling}"
         f"_model_lstm"
         f"_trainset_{lstm_params['n_train_samples']}"
         f"_epochs_{lstm_params['n_epochs']}"
@@ -599,7 +679,7 @@ if "deep_sif" in methods:
 
     deep_sif_model_name = (
         f"simu_{args.train_simu_type}_"
-        f"srcspace_{head_model.source_space.src_sampling}"
+        f"srcspace_{source_space.src_sampling}"
         f"_model_deepsif"
         f"_trainset_{deep_sif_params['n_train_samples']}"
         f"_epochs_{deep_sif_params['n_epochs']}"
@@ -651,7 +731,7 @@ if "eeg_vit" in methods:
         # fallback naming (similar pattern as others)
         vit_model_name = (
             f"simu_{args.train_simu_type}_"
-            f"srcspace_{head_model.source_space.src_sampling}"
+            f"srcspace_{source_space.src_sampling}"
             f"_model_vit"
             f"_trainset_{vit_params['n_train_samples']}"
             f"_epochs_{vit_params['n_epochs']}"
@@ -685,6 +765,59 @@ if "eeg_vit" in methods:
     eeg_vit = vit_net(**net_parameters)
     eeg_vit.load_state_dict(torch.load(vit_model_path, map_location=torch.device("cpu")))
     eeg_vit.eval()
+
+if "stct" in methods:
+    train_results_path = f"{results_path}/{train_dataset}"
+    if (stct_params["n_electrodes"] != n_electrodes) or (stct_params["n_sources"] != n_sources):
+        sys.exit(
+            (
+                "number of electrodes or sources in dataset does not match with number of electrodes or sources in stct model "
+                f"electrodes dataset : {n_electrodes} - electrodes stct : {stct_params['n_electrodes']} "
+                f"sources dataset : {n_sources} - sources stct : {stct_params['n_sources']}"
+            )
+        )
+
+    if args.train_run_dir:
+        stct_model_path = _pick_model_path_from_run_dir(args.train_run_dir, "stct")
+    else:
+        stct_model_name = (
+            f"simu_{args.train_simu_type}_"
+            f"srcspace_{source_space.src_sampling}"
+            f"_model_STCT"
+            f"_trainset_{stct_params['n_train_samples']}"
+            f"_epochs_{stct_params['n_epochs']}"
+            f"_loss_{stct_params['loss']}"
+            f"_norm_{stct_params['norm']}.pt"
+        )
+        stct_model_path = f"{train_results_path}/trained_models/{stct_params['exp']}/{stct_model_name}"
+
+    if os.path.exists(stct_model_path):
+        print("STCT model is available for use")
+    else:
+        sys.exit(
+            f"STCT model is not accessible.\nTry other parameters or train your model first.\n{stct_model_path}"
+        )
+
+    from models.st_cnn_transformer import STCNNTransformerpl as stct_net
+
+    net_parameters = {
+        "num_sensor": stct_params["n_electrodes"],
+        "num_source": stct_params["n_sources"],
+        "n_times": stct_params.get("n_times", n_times),
+        "embed_dim": stct_params.get("st_embed_dim", args.st_embed_dim),
+        "depth": stct_params.get("st_depth", args.st_depth),
+        "num_heads": stct_params.get("st_heads", args.st_heads),
+        "mlp_dim": stct_params.get("st_mlp_dim", args.st_mlp_dim),
+        "dropout": stct_params.get("st_dropout", args.st_dropout),
+        "spatial_hidden_channels": stct_params.get("st_spatial_hidden", args.st_spatial_hidden),
+        "spatial_kernel_size": stct_params.get("st_spatial_kernel", args.st_spatial_kernel),
+        "optimizer": None,
+        "lr": 1e-3,
+        "criterion": None,
+    }
+    stct = stct_net(**net_parameters)
+    stct.load_state_dict(torch.load(stct_model_path, map_location=torch.device("cpu")))
+    stct.eval()
 
 ##################################################################################################
 # to save metric values
@@ -805,11 +938,7 @@ for k in val_ds.indices:
             with torch.no_grad():
                 j_hat = cnn.model(M.unsqueeze(0)).squeeze()
             if cnn1d_params["loss"] == "cosine":
-                j_hat = utl.gfp_scaling(
-                    M_unscaled,
-                    j_hat,
-                    torch.from_numpy(fwd),
-                )
+                j_hat = _maybe_gfp_scale(M_unscaled, j_hat)
             else:  # amplitude rescale
                 j_hat = j_hat * val_ds.dataset.max_src[k]
 
@@ -817,11 +946,7 @@ for k in val_ds.indices:
             with torch.no_grad():
                 j_hat = lstm(M.unsqueeze(0)).squeeze()
             if lstm_params["loss"] == "cosine":
-                j_hat = utl.gfp_scaling(
-                    M_unscaled,
-                    j_hat,
-                    torch.from_numpy(fwd),
-                )  # * esi_datamodule.train_scaler.maxs[k]
+                j_hat = _maybe_gfp_scale(M_unscaled, j_hat)  # * esi_datamodule.train_scaler.maxs[k]
             else:  # amplitude rescale
                 j_hat = j_hat * val_ds.dataset.max_src[k]
 
@@ -829,11 +954,7 @@ for k in val_ds.indices:
             with torch.no_grad():
                 j_hat = deep_sif(M.unsqueeze(0)).squeeze()
             if deep_sif_params["loss"] == "cosine":
-                j_hat = utl.gfp_scaling(
-                    M_unscaled,
-                    j_hat,
-                    torch.from_numpy(fwd),
-                )  # * esi_datamodule.train_scaler.maxs[k]
+                j_hat = _maybe_gfp_scale(M_unscaled, j_hat)  # * esi_datamodule.train_scaler.maxs[k]
             else:  # amplitude rescale
                 j_hat = j_hat * val_ds.dataset.max_src[k]
 
@@ -841,7 +962,15 @@ for k in val_ds.indices:
             with torch.no_grad():
                 j_hat = eeg_vit(M.unsqueeze(0)).squeeze()
             if vit_params.get("loss", args.train_loss) == "cosine":
-                j_hat = utl.gfp_scaling(M_unscaled, j_hat, torch.from_numpy(fwd))
+                j_hat = _maybe_gfp_scale(M_unscaled, j_hat)
+            else:
+                j_hat = j_hat * val_ds.dataset.max_src[k]
+
+        elif method == "stct":
+            with torch.no_grad():
+                j_hat = stct(M.unsqueeze(0)).squeeze()
+            if stct_params.get("loss", args.train_loss) == "cosine":
+                j_hat = _maybe_gfp_scale(M_unscaled, j_hat)
             else:
                 j_hat = j_hat * val_ds.dataset.max_src[k]
 
@@ -979,7 +1108,7 @@ for method in methods:
     my_values = [
         {
             "simu_name": args.simu_name,
-            "src_space": head_model.source_space.src_sampling,
+            "src_space": source_space.src_sampling,
             "method": method,
             "method_info": method_info,
             "valset": str(n_val_samples),
@@ -1007,7 +1136,7 @@ for method in methods:
         f"train_simu_{args.train_simu_type}_"
         f"eval_simu_{args.eval_simu_type}_"
         f"method_{method}"
-        f"_srcspace_{head_model.source_space.src_sampling}"
+        f"_srcspace_{source_space.src_sampling}"
         f"_dataset{args.simu_name}"
         f"_n_train_{args.n_train_samples}"
         f"{args.save_suff}"
@@ -1054,7 +1183,7 @@ for method in methods:
         f"train_simu_{args.train_simu_type}_"
         f"eval_simu_{args.eval_simu_type}_"
         f"method_{method}"
-        f"_srcspace_{head_model.source_space.src_sampling}"
+        f"_srcspace_{source_space.src_sampling}"
         f"_dataset{args.simu_name}"
         f"_n_train_{args.n_train_samples}"
         f"{args.save_suff}"

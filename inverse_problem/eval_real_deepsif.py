@@ -1,8 +1,15 @@
 """
-Evaluate CNN-1D on EEG-only data and export predictions (`all_out`).
+Evaluate DeepSIF on EEG-only data and export predictions (`all_out`).
 
-Loads EEG files from a simulation folder (via the match JSON), runs a trained CNN-1D model,
-and saves `all_out` to a .mat file with shape:
+Loads EEG from:
+- `-real_data_dir` (MAT files with key 'eeg_data'), OR
+- the simulation folder (via match JSON)
+
+Supports:
+- `.pt` weights (from `<train_run_dir>/trained_models/DEEPSIF_model.pt`), OR
+- `.ckpt` Lightning checkpoints via `-ckpt_path`
+
+Saves `all_out` to a .mat file with shape:
   (n_samples, n_times, n_sources)
 """
 
@@ -21,21 +28,24 @@ from pytorch_lightning import seed_everything
 
 from load_data.utl_data import load_eeg_data_from_file, get_matching_info
 from utils import utl
-from models.cnn_1d import CNN1Dpl
+from models.deepsif import DeepSIFpl
 
 
 def _pick_model_path_from_run_dir(run_dir: str) -> str:
     trained_models_dir = os.path.join(run_dir, "trained_models")
     candidates = [
-        os.path.join(trained_models_dir, "1dcnn_model.pt"),
-        os.path.join(trained_models_dir, "1DCNN_model.pt"),
-        os.path.join(trained_models_dir, "cnn_1d_model.pt"),
-        os.path.join(trained_models_dir, "CNN1D_model.pt"),
+        os.path.join(trained_models_dir, "DEEPSIF_model.pt"),
+        os.path.join(trained_models_dir, "deepsif_model.pt"),
+        os.path.join(trained_models_dir, "DeepSIF_model.pt"),
+        os.path.join(trained_models_dir, "deep_sif_model.pt"),
     ]
     for p in candidates:
         if os.path.exists(p):
             return p
-    raise FileNotFoundError(f"Could not locate CNN-1D weights under: {trained_models_dir}")
+    raise FileNotFoundError(
+        f"Could not locate DeepSIF weights under: {trained_models_dir}. "
+        "Pass -weights_path to specify the .pt file explicitly."
+    )
 
 
 def _load_leadfield_mat(mat_path: str) -> np.ndarray:
@@ -88,7 +98,6 @@ def _load_eeg_matrix(path: str, n_times: int) -> np.ndarray:
     eeg = np.asarray(eeg, dtype=np.float32)
     if eeg.ndim == 2 and eeg.shape[0] > eeg.shape[1]:
         eeg = eeg.T
-
     if eeg.shape[1] < n_times:
         pad = np.zeros((eeg.shape[0], n_times - eeg.shape[1]), dtype=eeg.dtype)
         eeg = np.concatenate([eeg, pad], axis=1)
@@ -125,10 +134,8 @@ def _load_real_eeg_from_mat(mat_path: str, n_times: int) -> np.ndarray:
     eeg = np.asarray(m["eeg_data"], dtype=np.float32).squeeze()
     if eeg.ndim != 2:
         raise ValueError(f"Expected eeg_data to be 2D in {mat_path}, got shape={eeg.shape}")
-
     if eeg.shape[1] != n_times and eeg.shape[0] == n_times:
         eeg = eeg.T
-
     if eeg.shape[1] < n_times:
         pad = np.zeros((eeg.shape[0], n_times - eeg.shape[1]), dtype=eeg.dtype)
         eeg = np.concatenate([eeg, pad], axis=1)
@@ -142,52 +149,19 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(fromfile_prefix_chars="@")
     parser.add_argument("simu_name", type=str, help="Simulation name (folder name)")
-    parser.add_argument(
-        "-root_simu",
-        type=str,
-        required=False,
-        help="Simulation root. Either the subject folder or repo root containing `simulation/<subject>`",
-    )
+    parser.add_argument("-root_simu", type=str, required=False)
     parser.add_argument("-subject_name", type=str, default="fsaverage")
     parser.add_argument("-orientation", type=str, default="constrained")
     parser.add_argument("-electrode_montage", type=str, default="standard_1020")
     parser.add_argument("-source_space", type=str, default="fsav_994")
     parser.add_argument("-n_times", type=int, default=500)
-    parser.add_argument("-to_load", type=int, default=-1, help="Limit number of samples (<=0 means all)")
-    parser.add_argument(
-        "-real_data_dir",
-        type=str,
-        default=None,
-        help=(
-            "If set, load EEG from .mat files in this folder (expects key 'eeg_data') "
-            "instead of using the simulation folder match JSON."
-        ),
-    )
-    parser.add_argument(
-        "-real_data_glob",
-        type=str,
-        default="eeg_and_src_data_*.mat",
-        help="Glob pattern under -real_data_dir (ignored if -real_data_dir is a file).",
-    )
+    parser.add_argument("-to_load", type=int, default=-1)
+    parser.add_argument("-real_data_dir", type=str, default=None)
+    parser.add_argument("-real_data_glob", type=str, default="eeg_and_src_data_*.mat")
 
-    parser.add_argument(
-        "-leadfield_mat",
-        type=str,
-        required=True,
-        help="Path to leadfield .mat (used for optional GFP scaling)",
-    )
-    parser.add_argument(
-        "-train_run_dir",
-        type=str,
-        required=True,
-        help="Training run dir containing `trained_models/` (from main_train.py outputs)",
-    )
-    parser.add_argument(
-        "-weights_path",
-        type=str,
-        default=None,
-        help="Optional direct path to CNN1D .pt weights (overrides -train_run_dir)",
-    )
+    parser.add_argument("-leadfield_mat", type=str, required=True)
+    parser.add_argument("-train_run_dir", type=str, required=True)
+    parser.add_argument("-weights_path", type=str, default=None)
     parser.add_argument(
         "-ckpt_path",
         type=str,
@@ -198,20 +172,12 @@ def main() -> None:
             "Overrides -weights_path / -train_run_dir."
         ),
     )
-    parser.add_argument("-inter_layer", type=int, default=4096)
-    parser.add_argument("-kernel_size", type=int, default=5)
+
+    parser.add_argument("-deepsif_temporal_input_size", type=int, default=500)
+    parser.add_argument("-deepsif_rnn_layer", type=int, default=3)
     parser.add_argument("-batch_size", type=int, default=8)
-    parser.add_argument(
-        "--no_gfp_scaling",
-        action="store_true",
-        help="Disable GFP scaling (by default predictions are GFP-scaled using the leadfield).",
-    )
-    parser.add_argument(
-        "-out_mat",
-        type=str,
-        default=None,
-        help="Output .mat path. Default: <train_run_dir>/eval_real_all_out.mat",
-    )
+    parser.add_argument("--no_gfp_scaling", action="store_true")
+    parser.add_argument("-out_mat", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -219,7 +185,6 @@ def main() -> None:
     print(f"Device: {device}")
 
     fwd = np.asarray(_load_leadfield_mat(args.leadfield_mat), dtype=np.float32)
-    # n_sources comes from leadfield; n_electrodes should come from EEG data (often 75 even if LF has 90 rows).
     n_sources = int(fwd.shape[1])
 
     use_real_mats = args.real_data_dir is not None
@@ -229,9 +194,12 @@ def main() -> None:
             mat_paths = mat_paths[: args.to_load]
         n_samples = len(mat_paths)
         print(f"Loading {n_samples} EEG samples from real_data mats")
+        eeg0 = _load_real_eeg_from_mat(str(mat_paths[0]), args.n_times)
     else:
         if not args.root_simu:
-            parser.error("Either provide -root_simu (simulation mode) or -real_data_dir (real_data mode).")
+            parser.error(
+                "Either provide -root_simu (simulation mode) or -real_data_dir (real_data mode)."
+            )
 
         root_base = _resolve_root_base(Path(args.root_simu), args.subject_name)
         data_folder_name = os.path.normpath(
@@ -243,6 +211,7 @@ def main() -> None:
                 "simu",
             )
         )
+        # electrode count for config is just informational; we infer real count from file
         general_cfg = _build_general_config(
             simu_name=args.simu_name,
             orientation=args.orientation,
@@ -250,7 +219,7 @@ def main() -> None:
             source_space=args.source_space,
             n_times=args.n_times,
             n_sources=n_sources,
-            n_electrodes=n_electrodes,
+            n_electrodes=int(fwd.shape[0]),
         )
         ids, eeg_dict, _, _ = get_matching_info(
             data_folder_name=data_folder_name,
@@ -260,19 +229,14 @@ def main() -> None:
         if args.to_load and args.to_load > 0:
             ids = ids[: args.to_load]
         n_samples = len(ids)
-        print(f"Loading {n_samples} EEG samples from simulation folder")
-
-    # Infer EEG electrode count from the first sample
-    if use_real_mats:
-        eeg0 = _load_real_eeg_from_mat(str(mat_paths[0]), args.n_times)
-    else:
+        print(f"Loading {n_samples} EEG samples from simulation match JSON")
         eeg0 = _load_eeg_matrix(eeg_dict[ids[0]], args.n_times)
-    n_electrodes = int(eeg0.shape[0])
 
+    n_electrodes = int(eeg0.shape[0])
     if int(fwd.shape[0]) != n_electrodes:
         print(
             f"[WARN] leadfield electrodes={int(fwd.shape[0])} but EEG electrodes={n_electrodes}. "
-            "CNN1D will run with EEG electrodes; GFP scaling may fail unless you provide a matching leadfield."
+            "DeepSIF will run with EEG electrodes; GFP scaling may fail unless you provide a matching leadfield."
         )
 
     weights_path = None
@@ -283,56 +247,42 @@ def main() -> None:
         weights_path = args.weights_path or _pick_model_path_from_run_dir(args.train_run_dir)
         print(f"Using weights: {weights_path}")
 
-    model = CNN1Dpl(
-        channels=[n_electrodes, int(args.inter_layer), n_sources],
-        kernel_size=int(args.kernel_size),
-        bias=False,
+    model = DeepSIFpl(
+        num_sensor=n_electrodes,
+        num_source=n_sources,
+        temporal_input_size=args.deepsif_temporal_input_size,
+        rnn_layer=args.deepsif_rnn_layer,
         optimizer=None,
         lr=1e-3,
         criterion=None,
     )
+
     if args.ckpt_path:
         ckpt = torch.load(weights_path, map_location="cpu")
         state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
         model.load_state_dict(state, strict=True)
     else:
         model.load_state_dict(torch.load(weights_path, map_location="cpu"))
+
     model.eval()
     model.to(device)
 
     all_out = np.zeros((n_samples, args.n_times, n_sources), dtype=np.float32)
-    all_ids: List[str] = []
-    all_max_eeg = np.zeros((n_samples,), dtype=np.float32)
-
     G_torch = torch.from_numpy(fwd).to(device=device, dtype=torch.float32)
-    bs = max(1, int(args.batch_size))
-    for start in range(0, n_samples, bs):
-        end = min(n_samples, start + bs)
-        batch_ids = mat_paths[start:end] if use_real_mats else ids[start:end]
-        eeg_batch = []
-        max_batch = []
-        for _id in batch_ids:
-            if use_real_mats:
-                eeg = _load_real_eeg_from_mat(str(_id), args.n_times)
-            else:
-                eeg_path = eeg_dict[str(_id)]
-                eeg = _load_eeg_matrix(eeg_path, args.n_times)  # (E, T)
 
-            if eeg.shape[0] != n_electrodes:
-                raise ValueError(
-                    f"EEG electrode count mismatch for {_id}: got {eeg.shape[0]} electrodes, "
-                    f"expected {n_electrodes}"
-                )
-            mx = float(np.max(np.abs(eeg))) if eeg.size else 0.0
+    with torch.no_grad():
+        for i in range(n_samples):
+            if use_real_mats:
+                eeg = _load_real_eeg_from_mat(str(mat_paths[i]), args.n_times)
+            else:
+                eeg = _load_eeg_matrix(eeg_dict[ids[i]], args.n_times)
+
+            mx = float(np.max(np.abs(eeg))) if eeg.size else 1.0
             if mx == 0.0:
                 mx = 1.0
-            eeg_batch.append(eeg / mx)
-            max_batch.append(mx)
+            X = torch.from_numpy((eeg / mx)).unsqueeze(0).to(device=device, dtype=torch.float32)  # (1,E,T)
+            J = model(X).squeeze(0)  # (S,T)
 
-        X = torch.from_numpy(np.stack(eeg_batch, axis=0)).to(device=device, dtype=torch.float32)  # (B,E,T)
-
-        with torch.no_grad():
-            J = model(X)  # (B,S,T)
             if not args.no_gfp_scaling:
                 if int(fwd.shape[0]) != n_electrodes:
                     raise ValueError(
@@ -340,33 +290,17 @@ def main() -> None:
                         f"leadfield={tuple(fwd.shape)}, EEG electrodes={n_electrodes}. "
                         "Provide a matching leadfield or pass --no_gfp_scaling."
                     )
-                M_unscaled = X * torch.tensor(max_batch, device=device).view(-1, 1, 1)
-                J_scaled = []
-                for bi in range(J.shape[0]):
-                    J_scaled.append(utl.gfp_scaling(M_unscaled[bi], J[bi], G_torch))
-                J = torch.stack(J_scaled, dim=0)
+                M_unscaled = X.squeeze(0) * mx
+                J = utl.gfp_scaling(M_unscaled, J, G_torch)
 
-        J_np = J.detach().cpu().numpy().transpose(0, 2, 1).astype(np.float32)  # (B,T,S)
-        all_out[start:end, :, :] = J_np
-        if use_real_mats:
-            all_ids.extend([Path(x).name for x in batch_ids])
-        else:
-            all_ids.extend([str(x) for x in batch_ids])
-        all_max_eeg[start:end] = np.asarray(max_batch, dtype=np.float32)
+            all_out[i] = J.permute(1, 0).detach().cpu().numpy().astype(np.float32)  # (T,S)
 
-    out_mat = args.out_mat or os.path.join(args.train_run_dir, "eval_real_all_out.mat")
-    savemat(
-        out_mat,
-        {
-            "all_out": all_out,
-            "ids": np.array(all_ids, dtype=object),
-            "max_eeg": all_max_eeg,
-            "leadfield_path": str(args.leadfield_mat),
-            "weights_path": str(weights_path),
-        },
-    )
-    print(f"Saved: {out_mat}")
-    print(f"all_out shape: {all_out.shape}")
+            if (i + 1) % 50 == 0:
+                print(f"Processed {i+1}/{n_samples}")
+
+    out_path = args.out_mat or os.path.join(args.train_run_dir, "eval_real_all_out_deepsif.mat")
+    savemat(out_path, {"all_out": all_out})
+    print(f"Saved all_out to: {out_path}")
 
 
 if __name__ == "__main__":
