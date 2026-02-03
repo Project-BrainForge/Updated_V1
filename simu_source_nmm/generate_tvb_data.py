@@ -4,6 +4,7 @@ import time
 import numpy as np
 import multiprocessing as mp
 import os
+from pathlib import Path
 import argparse
 import matplotlib.pyplot as plt
 from scipy.signal import resample
@@ -12,13 +13,38 @@ def main(region_id, folder_name = "raw_nmm", reg_reshape=True):
     """ TVB Simulation to generate raw source space dynamics, unit in mV, and ms
     :param region_id: int; source region id, with parameters generating interictal spike activity
     """
-    if not os.path.exists(f'../source/{folder_name}'): 
-        os.mkdir(f'../source/{folder_name}')
-    if not os.path.isdir(f'../source/{folder_name}/a{region_id}/'):
-        os.mkdir(f'../source/{folder_name}/a{region_id}/')
+    # Resolve paths relative to the repository root (one level above this script).
+    repo_root = Path(__file__).resolve().parent.parent
+    out_root = repo_root / "source" / folder_name
+    region_out = out_root / f"a{region_id}"
+
+    # Be robust on Windows + multiprocessing: create parents and ignore "already exists".
+    out_root.mkdir(parents=True, exist_ok=True)
+    region_out.mkdir(parents=True, exist_ok=True)
+
     start_time = time.time()
     print('------ Generate data of region_id {} ----------'.format(region_id))
-    conn = connectivity.Connectivity.from_file(source_file=os.getcwd()+'/../anatomy/connectivity_998.zip') # connectivity provided by TVB
+
+    # Connectivity: prefer repo copy, fallback to TVB built-in data lookup.
+    conn_path = repo_root / "anatomy" / "connectivity_998.zip"
+    if conn_path.exists():
+        try:
+            conn = connectivity.Connectivity.from_file(source_file=str(conn_path))
+        except TypeError:
+            # Some TVB versions use a positional argument instead of `source_file=`.
+            conn = connectivity.Connectivity.from_file(str(conn_path))
+    else:
+        try:
+            try:
+                conn = connectivity.Connectivity.from_file(source_file="connectivity_998.zip")
+            except TypeError:
+                conn = connectivity.Connectivity.from_file("connectivity_998.zip")
+        except Exception as e:
+            raise FileNotFoundError(
+                "Could not find 'connectivity_998.zip' in repo at "
+                f"{conn_path} and TVB could not load a built-in copy. "
+                "Place the zip in 'anatomy/' or adjust the script to point to it."
+            ) from e
     conn.configure()
 
     # define A value
@@ -70,7 +96,7 @@ def main(region_id, folder_name = "raw_nmm", reg_reshape=True):
 
                 # downsample to save memory
                 data = resample(data, num=data.shape[0]//4)
-                savemat(f'../source/{folder_name}/a{region_id}/mean_iter_{iter_m}_a_iter_{region_id}_{iii}.mat',
+                savemat(str(region_out / f"mean_iter_{iter_m}_a_iter_{region_id}_{iii}.mat"),
                         {'time': t, 'data': data, 'A': use_A})
                 
                 #if iter_a not in [7, 325, 921, 949] : 

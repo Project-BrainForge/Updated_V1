@@ -271,6 +271,62 @@ def _pick_model_path_from_run_dir(run_dir: str, method: str) -> str:
         f"- {trained_models_dir}\n"
         "Expected something like `<run_dir>/trained_models/<MODEL>_model.pt`."
     )
+
+
+def _unwrap_state_dict(ckpt_obj):
+    """
+    Support multiple checkpoint formats:
+    - raw state_dict (mapping name -> tensor)
+    - PyTorch Lightning checkpoints: {"state_dict": ...}
+    - common training dicts: {"model_state_dict": ...}, {"model": ...}
+    """
+    if isinstance(ckpt_obj, dict):
+        for k in ("state_dict", "model_state_dict", "model"):
+            v = ckpt_obj.get(k, None)
+            if isinstance(v, dict):
+                return v
+    return ckpt_obj
+
+
+def _load_deepsif_weights(deep_sif_module, model_path: str) -> None:
+    """
+    DeepSIF weights may be saved either as:
+    - DeepSIFpl state_dict (keys start with 'model.')
+    - TemporalInverseNet state_dict (keys start with 'spatial.' / 'temporal.')
+    This loader handles both.
+    """
+    ckpt = torch.load(model_path, map_location=torch.device("cpu"))
+    state_dict = _unwrap_state_dict(ckpt)
+
+    # 1) Try loading into the LightningModule wrapper directly.
+    try:
+        deep_sif_module.load_state_dict(state_dict, strict=True)
+        return
+    except Exception:
+        pass
+
+    # 2) Try loading directly into the wrapped inner model (common training save format).
+    try:
+        deep_sif_module.model.load_state_dict(state_dict, strict=True)
+        return
+    except Exception:
+        pass
+
+    # 3) Strip 'model.' prefix and try inner model.
+    if isinstance(state_dict, dict) and any(k.startswith("model.") for k in state_dict.keys()):
+        stripped = {k[len("model."):]: v for k, v in state_dict.items() if k.startswith("model.")}
+        deep_sif_module.model.load_state_dict(stripped, strict=True)
+        return
+
+    # 4) Add 'model.' prefix and try wrapper.
+    if isinstance(state_dict, dict):
+        prefixed = {k if k.startswith("model.") else f"model.{k}": v for k, v in state_dict.items()}
+        deep_sif_module.load_state_dict(prefixed, strict=True)
+        return
+
+    raise RuntimeError(
+        "Unsupported DeepSIF checkpoint format: expected a state_dict-like mapping."
+    )
 # Normalize methods early so we can decide whether MNE is needed.
 methods_requested = _normalize_methods(args.methods)
 
@@ -709,9 +765,7 @@ if "deep_sif" in methods:
     from models.deepsif import DeepSIFpl as deep_sif_net
 
     deep_sif = deep_sif_net(**net_parameters)
-    deep_sif.load_state_dict(
-        torch.load(deep_sif_model_path, map_location=torch.device("cpu"))
-    )
+    _load_deepsif_weights(deep_sif, deep_sif_model_path)
     deep_sif.eval()
 
 if "eeg_vit" in methods:
