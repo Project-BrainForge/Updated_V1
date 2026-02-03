@@ -15,6 +15,7 @@ def load_eeg_data_from_file(file_name:str)->np.ndarray:
     input: file_name = name of the .mat file to laod
     output: eeg data as numpy array (dim:n_electrodes,n_times,n_trials)
     """
+    print("Loading EEG data from mat file: ", file_name)
     return loadmat(f"{file_name}")['eeg_data']['EEG']
 
 # for ource data... file + number of sources to reconstruct the data

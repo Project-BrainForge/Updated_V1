@@ -48,6 +48,60 @@ def _pick_model_path_from_run_dir(run_dir: str) -> str:
     )
 
 
+def _unwrap_state_dict(ckpt_obj):
+    """
+    Support multiple checkpoint formats:
+    - raw state_dict (mapping name -> tensor)
+    - PyTorch Lightning checkpoints: {"state_dict": ...}
+    - common training dicts: {"model_state_dict": ...}, {"model": ...}
+    """
+    if isinstance(ckpt_obj, dict):
+        for k in ("state_dict", "model_state_dict", "model"):
+            v = ckpt_obj.get(k, None)
+            if isinstance(v, dict):
+                return v
+    return ckpt_obj
+
+
+def _load_deepsif_weights(deep_sif_module: DeepSIFpl, weights_path: str) -> None:
+    """
+    DeepSIF weights may be saved either as:
+    - DeepSIFpl state_dict (keys start with 'model.')
+    - TemporalInverseNet state_dict (keys start with 'spatial.' / 'temporal.')
+    This loader handles both, plus Lightning checkpoints that wrap a state_dict.
+    """
+    ckpt = torch.load(weights_path, map_location="cpu")
+    state_dict = _unwrap_state_dict(ckpt)
+
+    # 1) Try loading into the LightningModule wrapper directly.
+    try:
+        deep_sif_module.load_state_dict(state_dict, strict=True)
+        return
+    except Exception:
+        pass
+
+    # 2) Try loading directly into the wrapped inner model.
+    try:
+        deep_sif_module.model.load_state_dict(state_dict, strict=True)
+        return
+    except Exception:
+        pass
+
+    # 3) Strip 'model.' prefix and try inner model.
+    if isinstance(state_dict, dict) and any(k.startswith("model.") for k in state_dict.keys()):
+        stripped = {k[len("model."):]: v for k, v in state_dict.items() if k.startswith("model.")}
+        deep_sif_module.model.load_state_dict(stripped, strict=True)
+        return
+
+    # 4) Add 'model.' prefix and try wrapper.
+    if isinstance(state_dict, dict):
+        prefixed = {k if k.startswith("model.") else f"model.{k}": v for k, v in state_dict.items()}
+        deep_sif_module.load_state_dict(prefixed, strict=True)
+        return
+
+    raise RuntimeError("Unsupported DeepSIF checkpoint format: expected a state_dict-like mapping.")
+
+
 def _load_leadfield_mat(mat_path: str) -> np.ndarray:
     m = loadmat(mat_path)
     if "G" in m:
@@ -257,12 +311,7 @@ def main() -> None:
         criterion=None,
     )
 
-    if args.ckpt_path:
-        ckpt = torch.load(weights_path, map_location="cpu")
-        state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
-        model.load_state_dict(state, strict=True)
-    else:
-        model.load_state_dict(torch.load(weights_path, map_location="cpu"))
+    _load_deepsif_weights(model, weights_path)
 
     model.eval()
     model.to(device)
