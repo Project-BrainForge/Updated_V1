@@ -33,3 +33,5 @@ venv/
 *.npy
 
 real_data/
+
+eeg_real_mri_data/
