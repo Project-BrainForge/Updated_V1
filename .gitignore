@@ -40,3 +40,5 @@ brain-viz-app/.next/
 real_data/
 
 brain-viz-app/
+
+eeg_real_mri_data/

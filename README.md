@@ -1,4 +1,5 @@
 # Environment
+
 ```
 conda env create -n pt_env python=3.9
 conda activate pt_env
@@ -9,39 +10,68 @@ pip install colorednoise
 pip install tensorboard
 ```
 
+## Convert EDF EEG to MAT (for eval_real\*.py)
+
+If you have EDF recordings (e.g. under `eeg_real_mri_data/`) and want to test the Python models using
+`inverse_problem/eval_real*.py` in "real-data" mode (`-real_data_dir`), convert each EDF into a set
+of windowed `.mat` files containing `eeg_data` (and `data` for compatibility with `eval_real_vit.py`):
+
+```
+python tools/convert_edf_to_mat.py --input_dir eeg_real_mri_data --output_dir real_data --resample_fs 500 --window 500 --stride 500
+```
+
+Notes:
+
+- The eval scripts expect `eeg_data` to be shaped `(n_electrodes, n_times)`.
+- Your EDF electrode count must match the leadfield electrode count used by the model (often 75 in this repo).
+  If you only have 19 electrodes, you must either use a 19-electrode leadfield / trained weights, or map into
+  the 75-electrode ordering (missing channels become zeros) using:
+
+```
+python tools/convert_edf_to_mat.py --input_dir eeg_real_mri_data --output_dir real_data --resample_fs 500 --window 500 --stride 500 --target_electrodes_mat anatomy/electrode_75.mat
+
+python tools/convert_edf_to_mat.py --input_dir eeg_real_mri_data --output_dir real_data --window -1 --save_full
+```
+
 # Create head model
+
 `simu_head_model/`
 
 Head Model gathers
+
 - source positions and orientations
 - electrode positions
 - BEM model (conductor model)
 - Leadfield matrix
 - triangle and vertices of the brain mesh
-It is created using the mne-python library.
+  It is created using the mne-python library.
 
 `create_head_model.py`
-Example of command line to create a head model with the following parameters:  
+Example of command line to create a head model with the following parameters:
+
 - subject: fsaverage
 - source space subsampling: ico3
 - electrode montage: standard_1020
 - sources with constrained (fixed) orientation
 - default conductivity values = (0.3, 0.006, 0.3)
 - save to save the model
+
 ```
 python create_head_model.py -subject_name fsaverage -source_sampling ico3 -electrode_montage standard_1020 -constrained -conductivity 0.3 0.006 0.3 -save
 ```
 
-*Nota* : 
-- 2 subjects are currently supported: fsaverage and sample (*to come: deepsif*)
+_Nota_ :
+
+- 2 subjects are currently supported: fsaverage and sample (_to come: deepsif_)
 - 2 electrode montage are currently supported: standard_1020 and sample (however it is not difficult to add a new one if it is available in mne-python)
-- *to come: pour le cas deepsif : retourne deux matrices de leadfield -> region qui correspond au leadfield obtenu en plaçant un dipole par région et summed qui correspond au leadfield obtenu en sommant les dipoles de la région (comme c'est fait dans deepsif)
+- \*to come: pour le cas deepsif : retourne deux matrices de leadfield -> region qui correspond au leadfield obtenu en plaçant un dipole par région et summed qui correspond au leadfield obtenu en sommant les dipoles de la région (comme c'est fait dans deepsif)
 
 # SEREEGA simulations
+
 `simu_sereega/`
 
 **Matlab**
-**First**: download SEREEGA toolbox at https://github.com/lrkrol/SEREEGA 
+**First**: download SEREEGA toolbox at https://github.com/lrkrol/SEREEGA
 Put the SEREEGA codes in the same folder as SEREEGA simulations code (or anywhere else but change `sereega_add_path.m` script).
 
 Single or multiple extended sources simulations (same script), with "event related" like activity.
@@ -49,60 +79,63 @@ Single or multiple extended sources simulations (same script), with "event relat
 /!/ run sereega_add_path.m before trying to launch other scripts.
 
 A lot of parameters in this script which can be changed, about the head model, the spatial and temporal pattern.
-Important parameters of the simulation are : 
-*head model to use* : had to be simulated first (c.f above).
-*spatial pattern*
+Important parameters of the simulation are :
+_head model to use_ : had to be simulated first (c.f above).
+_spatial pattern_
+
 - order_min, order_max: min and max extension order of a region of neighboring active sources
-- n_patch_min, n_patch_max: min and max number of active ragions of neighboring sources
-*temporal patter*
-- amplitude, width and center: of the Gaussian signal used to simulate the waveform. 
+- n*patch_min, n_patch_max: min and max number of active ragions of neighboring sources
+  \_temporal patter*
+- amplitude, width and center: of the Gaussian signal used to simulate the waveform.
 - dev parameters for amplitude, width and center: controls the variability of the dataset
 
 ## if you want to manipulate data but not use matlab
+
 `simu_source_python/`
 
--> python code to simulate data which should be similar to the sereega simulations. 
+-> python code to simulate data which should be similar to the sereega simulations.
 `simu_extended_source.py`
+
 - Give the information about the (previously simulated) head model to use (subject name, elecrode montage, source subsampling, orientation)
 - Give a name for the simulation
 - Timeline parameters (sampling frequency, duration in ms)
-- Spatial and temporal parameters for the source simulation 
-Example :
+- Spatial and temporal parameters for the source simulation
+  Example :
+
 ```
 python simu_extended_source.py -sin mes_debug_python -ne 100 -mk standard_1020 -ss ico3 -o constrained -sn fsaverage -fs 512 -d 500 -m 2 -np_min 1 -np_max 3 -o_min 1 -o_max 5 -amp 10 -w 60
 ```
 
 python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 100 -mk standard_1020 -ss fsav_994 -o constrained -sn fsaverage -rf D:/fyp/stESI_pub --leadfield_mat D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -fs 500 -d 500
 
-
 python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 100 -mk standard_1020 -ss fsav_994 -o constrained -sn fsaverage -rf D:/fyp/stESI_pub --leadfield_mat D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -fs 500 -d 1000
 
 python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 200000 -mk standard_1020 -ss fsav_994 -o constrained -sn fsaverage -rf D:/fyp/stESI_pub --leadfield_mat D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -fs 500 -d 1000
 
-# NMM based data simulation 
+# NMM based data simulation
+
 original code from: https://github.com/bfinl/DeepSIF
-Code was modified to make it work on our machines. 
+Code was modified to make it work on our machines.
 
 First load the anatomy data from the original deepSIF code github, and place it in a "anatomy" folder
 
-
 - To launch TVB simulation of raw NMM data: bash_tvb_simu.sh /!\ here: maybe change the path to anatomy folder
-- Then post process data using: 
-	- process_raw_nmm.m
-	- generate_synthetic_data.m
+- Then post process data using:
+  - process_raw_nmm.m
+  - generate_synthetic_data.m
 
+# References
 
-# References 
 - mne-python: https://mne.tools/stable/index.html
 - SEREEGA: Krol, L. R., Pawlitzki, J., Lotte, F., Gramann, K., & Zander, T. O. (2018). SEREEGA: Simulating Event-Related EEG Activity. Journal of Neuroscience Methods, 309, 13-24.
-- LSTM network and simulation of extended sources : 
-    - https://github.com/LukeTheHecker/esinet
-    - Hecker L, Rupprecht R, Tebartz Van Elst L and Kornmeier J (2021) ConvDip: A Convolutional Neural Network for Better EEG Source Imaging. Front. Neurosci. 15:569918. doi: 10.3389/fnins.2021.569918
-    - Hecker L., Rupprecht R., Tebartz van Elst L., Kornmeier J., Long-Short Term Memory Networks for Electric Source Imaging with Distributed Dipole Models, bioRxiv 2022.04.13.488148; doi: https://doi.org/10.1101/2022.04.13.488148
-- deepSIF network and NMM simulations: 
-    - Sun R, Sohrabpour A, Worrell GA, He B: “Deep Neural Networks Constrained by Neural Mass Models Improve Electrophysiological Source Imaging of Spatio-temporal Brain Dynamics.” Proceedings of the National Academy of Sciences of the United States of America 119.31 (2022): e2201128119.
-    - https://github.com/bfinl/DeepSIF 
-    - seems to be an updated version of the codes: https://github.com/RuifengZheng/DeepSIF
-    - NMM data simulations: 
-        - source code: https://github.com/the-virtual-brain/tvb-root
-        - doc: https://docs.thevirtualbrain.org/
+- LSTM network and simulation of extended sources :
+  - https://github.com/LukeTheHecker/esinet
+  - Hecker L, Rupprecht R, Tebartz Van Elst L and Kornmeier J (2021) ConvDip: A Convolutional Neural Network for Better EEG Source Imaging. Front. Neurosci. 15:569918. doi: 10.3389/fnins.2021.569918
+  - Hecker L., Rupprecht R., Tebartz van Elst L., Kornmeier J., Long-Short Term Memory Networks for Electric Source Imaging with Distributed Dipole Models, bioRxiv 2022.04.13.488148; doi: https://doi.org/10.1101/2022.04.13.488148
+- deepSIF network and NMM simulations:
+  - Sun R, Sohrabpour A, Worrell GA, He B: “Deep Neural Networks Constrained by Neural Mass Models Improve Electrophysiological Source Imaging of Spatio-temporal Brain Dynamics.” Proceedings of the National Academy of Sciences of the United States of America 119.31 (2022): e2201128119.
+  - https://github.com/bfinl/DeepSIF
+  - seems to be an updated version of the codes: https://github.com/RuifengZheng/DeepSIF
+  - NMM data simulations:
+    - source code: https://github.com/the-virtual-brain/tvb-root
+    - doc: https://docs.thevirtualbrain.org/

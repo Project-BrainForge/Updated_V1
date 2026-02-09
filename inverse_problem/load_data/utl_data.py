@@ -93,7 +93,7 @@ def load_eeg_data(js_eeg:dict, general_config_dict:dict, ids:list, as_tensor:boo
     for id in ids:
         #file_name = f"{folders.eeg_folder}/{js_eeg[id]['eeg_file']}"
         file_name   = f"{js_eeg[id]}"
-        # print("file_name: ", file_name)
+        print("file_name: ", file_name)
         eeg_data[i, :, :] = load_eeg_data_from_file(file_name)[0][0]
         i += 1
 
