@@ -162,9 +162,34 @@ class EsiDatasetds_new(Dataset):
             src_data = src_data / eeg_data_bis.abs().max()
             
             
-        # save as mat file with index as the file name 
-        # need only one mat with bot eeg anfd source data
-        #savemat(f"eeg_and_src_data_{index}.mat", {"eeg_data": eeg_data, "src_data": src_data})
+        # save as mat file with index as the file name
+        # Build region matrix: one column per patch, rows = source indices (0-padded)
+        act_src = self.md_dict[self.ids[index]].get("act_src", {})
+        patches_list = [
+            act_src[k]
+            for k in sorted(act_src.keys(), key=lambda x: int(x.split("_")[-1]))
+        ]
+        if patches_list:
+            max_len = max(len(p) for p in patches_list)
+            region_data = np.zeros((max_len, len(patches_list)), dtype=np.int64)
+            for col, p in enumerate(patches_list):
+                region_data[: len(p), col] = p
+            # active_regions = source region indices with non-zero rows in src_data (no zero padding)
+            active_regions = np.unique(np.concatenate(patches_list)).astype(np.int64)
+        else:
+            region_data = np.zeros((0, 0), dtype=np.int64)
+            active_regions = np.array([], dtype=np.int64)
+        eeg_np = eeg_data.numpy() if hasattr(eeg_data, "numpy") else np.asarray(eeg_data)
+        src_np = src_data.numpy() if hasattr(src_data, "numpy") else np.asarray(src_data)
+        savemat(
+            f"eeg_and_src_data_{index}.mat",
+            {
+                "eeg_data": eeg_np,
+                "src_data": src_np,
+                "region_data": region_data,
+                "active_regions": active_regions,
+            },
+        )
 
         return eeg_data, src_data
 

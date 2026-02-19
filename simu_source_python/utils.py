@@ -1,10 +1,13 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-def get_component_extended_src(order, seed, neighbors, spos, erp_params, erp_dev, timeline):
-
+def get_component_extended_src(order, seed, neighbors, spos, erp_params, erp_dev, timeline, patch_override=None):
+    """If patch_override is provided (1D array of region indices), use it as the patch instead of get_patch."""
     amplitude = erp_params['ampl']
-    patch = get_patch(order, seed, neighbors)
+    if patch_override is not None:
+        patch = np.asarray(patch_override, dtype=np.int64)
+    else:
+        patch = get_patch(order, seed, neighbors)
     n_source_in_patch = patch.shape[0]
 
     c = []
@@ -36,6 +39,7 @@ def get_component_extended_src(order, seed, neighbors, spos, erp_params, erp_dev
 
     else : 
         c.append( erp_component(patch[0], erp_params, erp_dev, timeline) )
+        patch_dim = 0.0
     return c, patch, patch_dim
 
 

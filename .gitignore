@@ -6,6 +6,7 @@ __pycache__/
 
 simu_head_model/__pycache__/
 simu_nmm
+.venv/
 
 simu_sereega/docs/
 simu_sereega/leadfield/

@@ -48,6 +48,7 @@ parser.add_argument("-np_min", "--n_patch_min", type=int, default=1, help="minim
 parser.add_argument("-np_max", "--n_patch_max", type=int, default=5, help="maximum number of patches")
 parser.add_argument("-o_min", "--order_min", type=int, default=1, help="minimum order of a patch")
 parser.add_argument("-o_max", "--order_max", type=int, default=5, help="maximum order of a patch")
+parser.add_argument("-max_active", "--max_active_regions", type=int, default=70, help="maximum number of active regions per sample (across all patches)")
 
 ## TEMPORAL PATTERN PARAMETERS 
 parser.add_argument("-s_type", "--sig_type", type=str, default="erp", help="type of source signal")
@@ -146,7 +147,7 @@ def _load_leadfield_mat(mat_path: str) -> np.ndarray:
     if "G" in m:
         return m["G"]
     if "fwd" in m:
-        return m["fwd"]
+        return m["fwd"]  
     # Fallback: first 2D numeric array
     for k, v in m.items():
         if k.startswith("__"):
@@ -173,7 +174,7 @@ leadfield = None
 spos = None
 
 # Optional override leadfield (e.g. 75x994 regional leadfield)
-if args.leadfield_mat is not None:
+if args.leadfield_mat is not None: 
     leadfield = _load_leadfield_mat(args.leadfield_mat)
     # If regional (994), load matching region positions from repo anatomy.
     if leadfield.shape[1] == 994:
@@ -203,7 +204,7 @@ n_electrodes = leadfield.shape[0]
 # from the repo-level anatomy folder and compute neighbors via kNN.
 if n_sources == 994 and args.leadfield_mat is not None:
     # spos already loaded above
-    neighbors = _compute_knn_neighbors(spos, k=10)
+    neighbors = _compute_knn_neighbors(spos, k=70)
 else:
     # Vertex/ico source spaces: use MNE forward for mesh neighbors
     fwd = mne.read_forward_solution(
@@ -227,6 +228,21 @@ else:
     from utils import get_neighbors
 
     neighbors = get_neighbors([fwd["src"][0]["use_tris"], fwd["src"][1]["use_tris"]], vertices)
+    # Limit neighbors to maximum 70 per vertex (based on mesh topology)
+    max_neighbors = 70
+    n_vertices = neighbors.shape[0]
+    neighbors_limited = np.zeros((n_vertices, max_neighbors), dtype=np.int64)
+    for i in range(n_vertices):
+        # Get valid neighbors (filter out padding zeros and invalid values)
+        # Note: get_patch filters neighb>0, so we keep only positive indices
+        valid_neighbors = neighbors[i][neighbors[i] > 0]
+        # Limit to max_neighbors
+        n_valid = min(len(valid_neighbors), max_neighbors)
+        neighbors_limited[i, :n_valid] = valid_neighbors[:n_valid]
+        # Fill remaining with zeros (padding)
+        if n_valid < max_neighbors:
+            neighbors_limited[i, n_valid:] = 0
+    neighbors = neighbors_limited
     if spos is None:
         src = loadmat(os.path.join(model_path, f"sources_{suf}.mat"))
         spos = src["positions"]
@@ -275,13 +291,18 @@ for e in range(1,args.n_examples+1) :
                                base_center + p_center_dev*base_center ])
     
     to_remove = []
-    available_sources = np.arange(0,n_sources,1) 
-    
+    available_sources = np.arange(0,n_sources,1)
+    max_active_regions = args.max_active_regions
+
     for p in range(1,n_patch+1):
+        n_used = sum(len(patches[k]) for k in patches)
+        n_available = max(0, max_active_regions - n_used)
+        if n_available <= 0:
+            break
         #spatial
         order               = np.random.randint(args.order_min, args.order_max)
         available_sources   = np.delete(available_sources, to_remove)
-        seed                = int(np.random.choice(available_sources, 1))
+        seed                = int(np.random.choice(available_sources, 1).item())
 
 
         #print(f"seed : {seed}, order : {order}")
@@ -300,8 +321,19 @@ for e in range(1,args.n_examples+1) :
         }
         
         # get the components of the patch
-        [c,patch, patch_dim] = utils.get_component_extended_src(order, seed, neighbors, spos,
-                                erp_params, erp_dev_intra_patch, timeline )
+        [c, patch, patch_dim] = utils.get_component_extended_src(order, seed, neighbors, spos,
+                                erp_params, erp_dev_intra_patch, timeline)
+        # cap total active regions to max_active_regions: truncate this patch if needed
+        if len(patch) > n_available:
+            seed_pos = spos[seed, :]
+            d = np.sqrt(np.sum((spos[patch, :] - seed_pos) ** 2, axis=1))
+            idx_sort = np.argsort(d)
+            patch_truncated = np.asarray(patch)[idx_sort[: int(n_available)]]
+            [c, patch, patch_dim] = utils.get_component_extended_src(
+                order, seed, neighbors, spos,
+                erp_params, erp_dev_intra_patch, timeline,
+                patch_override=patch_truncated,
+            )
         
         margin_sources = utils.get_patch( order+args.margin, seed, neighbors )
         to_remove = np.hstack([to_remove, np.squeeze(margin_sources).astype(int)]).astype(int)
@@ -321,7 +353,9 @@ for e in range(1,args.n_examples+1) :
         #orders = np.hstack([orders, int(np.squeeze(order))]) #orders.append(order)
         orders.append(int(order))
         seeds.append(seed) #seeds = np.hstack([seeds, int(seed)])
-        n_src += len(patches[f'patch_{p}'])    
+        n_src += len(patches[f'patch_{p}'])
+
+    n_patch = len(patches)  # actual number of patches (may be less if max_active_regions cap hit)
         
     [X,source_data] = utils.generate_scalp_data(c_tot, leadfield, timeline)
     

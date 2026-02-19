@@ -18,6 +18,8 @@ Example for the 1dcnn, on the _dps_sereega_2src_om3_train_big_ dataset, with 100
 
 ```
 python main_train.py _dps_sereega_2src_om3_train_big_ sereega -source_space fsav_994 -spikes_folder nmm_spikes_nov23_train -model 1dcnn -to_load 100 -eeg_snr 5 -inter_layer 2048 -kernel_size 5 -batch_size 8 -n_epochs 100 -scaler linear -loss cosine -sfolder train_size_impact
+
+python inverse_problem/main_train.py mes_debug_python -root_simu /media/pasindu/DATA/fyp/stESI_pub -results_path /media/pasindu/DATA/fyp/stESI_pub/inverse_problem/results -simu_type sereega -source_space fsav_994 -electrode_montage standard_1020 -orientation constrained -spikes_folder nmm_spikes_nov23 -model DEEPSIF -to_load 100 -per_valid 0.2 -n_times 500 -eeg_snr 5 -loss cosine -scaler linear -leadfield_mat /media/pasindu/DATA/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -deepsif_temporal_input_size 500
 ```
 ## Eval
 Example of command for evaluation : 
