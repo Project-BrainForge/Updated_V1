@@ -77,7 +77,7 @@ python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 100 
 
 python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 100 -mk standard_1020 -ss fsav_994 -o constrained -sn fsaverage -rf D:/fyp/stESI_pub --leadfield_mat D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -fs 500 -d 1000
 
-python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 100 -mk standard_1020 -ss fsav_994 -o constrained -sn fsaverage -rf /media/pasindu/DATA/fyp/stESI_pub --leadfield_mat /media/pasindu/DATA/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -fs 500 -d 1000
+python simu_source_python/simu_extended_source.py -sin mes_debug_python -ne 2000 -mk standard_1020 -ss fsav_994 -o constrained -sn fsaverage -rf /media/pasindu/DATA/fyp/stESI_pub --leadfield_mat /media/pasindu/DATA/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -fs 500 -d 1000
 
 # NMM based data simulation 
 original code from: https://github.com/bfinl/DeepSIF
