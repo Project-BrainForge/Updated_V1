@@ -7,3 +7,8 @@ python eval_real_deepsif.py mes_debug_python -real_data_dir "D:/fyp/stESI_pub/re
 
 
 python inverse_problem/main_train.py mes_debug_python -root_simu D:/fyp/stESI_pub -results_path D:/fyp/stESI_pub/inverse_problem/results -simu_type sereega -source_space fsav_994 -electrode_montage standard_1020 -orientation constrained -spikes_folder nmm_spikes_nov23 -model STCT -to_load 100 -per_valid 0.2 -n_times 500 -eeg_snr 5 -loss cosine -scaler linear -leadfield_mat D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -st_embed_dim 256 -st_depth 6 -st_heads 8 -st_mlp_dim 512 -st_dropout 0.1 -st_spatial_hidden 64 -st_spatial_kernel 5
+
+
+
+python eval_real_vit.py mes_debug_python -real_data_dir "/media/pasindu/DATA/fyp/stESI_pub/real_data" -real_data_glob "eeg_and_src_data*.mat" -n_times 500 -to_load 10 -leadfield_mat "/media/pasindu/DATA/fyp/stESI_pub/anatomy/leadfield_75_20k.mat" -train_run_dir "/media/pasindu/DATA/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/trainings/simu_SEREEGA_srcspace_fsav_994_model_VIT_trainset_80000_epochs_100_loss_cosine_norm_linear" -ckpt_path "/media/pasindu/DATA/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/trainings/simu_SEREEGA_srcspace_fsav_994_model_VIT_trainset_80000_epochs_100_loss_cosine_norm_linear/pl_checkpoints/pl_checkpoints_epoch=38-train_loss=-0.12.ckpt" -out_mat "/media/pasindu/DATA/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/eval_real_all_out_vit_80000_38_limited_regions.mat"
+
