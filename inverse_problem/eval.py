@@ -144,6 +144,15 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "-ckpt_path",
+    action="append",
+    default=[],
+    help=(
+        "Override model weights with explicit checkpoints."
+        " Format: METHOD:/abs/path/to/checkpoint (repeat flag per method)."
+    ),
+)
+parser.add_argument(
     "-inter_layer", type=int, default=2048, help="number of channels of the 1dcnn"
 )
 parser.add_argument(
@@ -243,7 +252,73 @@ def _pick_model_path_from_run_dir(run_dir: str, method: str) -> str:
         f"- {trained_models_dir}\n"
         "Expected something like `<run_dir>/trained_models/<MODEL>_model.pt`."
     )
+
+
+def _parse_ckpt_overrides(entries):
+    overrides = {}
+    for entry in entries or []:
+        if ":" not in entry:
+            raise ValueError(
+                "-ckpt_path entries must look like METHOD:/abs/path/to/checkpoint"
+            )
+        method, path = entry.split(":", 1)
+        method = method.strip()
+        path = path.strip()
+        if not method or not path:
+            raise ValueError(
+                "-ckpt_path entries require both a method name and a checkpoint path"
+            )
+        method_norm = _normalize_methods([method])[0]
+        overrides[method_norm] = path
+    return overrides
+
+
+def _strip_prefix(state_dict, prefix):
+    changed = False
+    new_state = {}
+    for k, v in state_dict.items():
+        if k.startswith(prefix):
+            new_state[k[len(prefix) :]] = v
+            changed = True
+        else:
+            new_state[k] = v
+    return new_state if changed else None
+
+
+def _add_prefix(state_dict, prefix):
+    return {f"{prefix}{k}": v for k, v in state_dict.items()}
+
+
+def _load_module_weights(module, weights_path):
+    checkpoint = torch.load(weights_path, map_location=torch.device("cpu"))
+    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
+        base_state = checkpoint["state_dict"]
+    else:
+        base_state = checkpoint
+
+    candidates = [base_state]
+    for prefix in ("model.", "model.model."):
+        stripped = _strip_prefix(base_state, prefix)
+        if stripped is not None:
+            candidates.append(stripped)
+    for prefix in ("model.",):
+        candidates.append(_add_prefix(base_state, prefix))
+
+    last_error = None
+    for cand in candidates:
+        try:
+            module.load_state_dict(cand)
+            return
+        except RuntimeError as err:
+            last_error = err
+    raise RuntimeError(f"Failed to load weights from {weights_path}: {last_error}")
+
+
 # Normalize methods early so we can decide whether MNE is needed.
+try:
+    ckpt_overrides = _parse_ckpt_overrides(args.ckpt_path)
+except ValueError as exc:
+    parser.error(str(exc))
 methods_requested = _normalize_methods(args.methods)
 
 # Only linear inverse methods require `mne`
@@ -502,6 +577,7 @@ if "cnn_1d" in methods:
         cnn_model_path = _pick_model_path_from_run_dir(args.train_run_dir, "cnn_1d")
     else:
         cnn_model_path = f"{train_results_path}/trained_models/{cnn1d_params['exp']}/{cnn_model_name}"
+    cnn_model_path = ckpt_overrides.get("cnn_1d", cnn_model_path)
     if os.path.exists(cnn_model_path):
         print("CNN model is available for use")
     else:
@@ -526,7 +602,7 @@ if "cnn_1d" in methods:
         # "dropout_rate" : 0.2
     }
     cnn = cnn1d_net(**net_parameters)
-    cnn.load_state_dict(torch.load(cnn_model_path))
+    _load_module_weights(cnn, cnn_model_path)
     cnn.eval()
 
 
@@ -557,6 +633,7 @@ if "lstm" in methods:
         lstm_model_path = _pick_model_path_from_run_dir(args.train_run_dir, "lstm")
     else:
         lstm_model_path = f"{train_results_path}/trained_models/{lstm_params['exp']}/{lstm_model_name}"
+    lstm_model_path = ckpt_overrides.get("lstm", lstm_model_path)
     if os.path.exists(lstm_model_path):
         print("LSTM model is available for use")
     else:
@@ -579,7 +656,7 @@ if "lstm" in methods:
     }
 
     lstm = lstm_net(**net_parameters)
-    lstm.load_state_dict(torch.load(lstm_model_path))
+    _load_module_weights(lstm, lstm_model_path)
     lstm.eval()
 
 
@@ -610,6 +687,7 @@ if "deep_sif" in methods:
         deep_sif_model_path = _pick_model_path_from_run_dir(args.train_run_dir, "deep_sif")
     else:
         deep_sif_model_path = f"{train_results_path}/trained_models/{deep_sif_params['exp']}/{deep_sif_model_name}"
+    deep_sif_model_path = ckpt_overrides.get("deep_sif", deep_sif_model_path)
     if os.path.exists(deep_sif_model_path):
         print("DEEP SIF model is available for use")
     else:
@@ -629,9 +707,7 @@ if "deep_sif" in methods:
     from models.deepsif import DeepSIFpl as deep_sif_net
 
     deep_sif = deep_sif_net(**net_parameters)
-    deep_sif.load_state_dict(
-        torch.load(deep_sif_model_path, map_location=torch.device("cpu"))
-    )
+    _load_module_weights(deep_sif, deep_sif_model_path)
     deep_sif.eval()
 
 if "eeg_vit" in methods:
@@ -659,6 +735,7 @@ if "eeg_vit" in methods:
             f"_norm_{vit_params['norm']}.pt"
         )
         vit_model_path = f"{train_results_path}/trained_models/{vit_params['exp']}/{vit_model_name}"
+    vit_model_path = ckpt_overrides.get("eeg_vit", vit_model_path)
 
     if os.path.exists(vit_model_path):
         print("EEGViT model is available for use")
@@ -683,7 +760,7 @@ if "eeg_vit" in methods:
         "criterion": None,
     }
     eeg_vit = vit_net(**net_parameters)
-    eeg_vit.load_state_dict(torch.load(vit_model_path, map_location=torch.device("cpu")))
+    _load_module_weights(eeg_vit, vit_model_path)
     eeg_vit.eval()
 
 ##################################################################################################

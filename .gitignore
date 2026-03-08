@@ -38,7 +38,7 @@ brain-viz-app/.next/
 
 
 real_data/
-
+.venv/
 brain-viz-app/
 
 eeg_real_mri_data/

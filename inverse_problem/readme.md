@@ -44,3 +44,14 @@ python eval.py mes_debug_python -eval_simu_type SEREEGA -root_simu "C:/Users/pas
 
 
 python eval_real_vit.py mes_debug_python -root_simu "C:/Users/pasin/Documents/Data/simulation/fsaverage" -subject_name fsaverage -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -n_times 500 -to_load 10 -leadfield_mat "D:/fyp/stESI_pub/anatomy/leadfield_75_20k.mat" -train_run_dir "D:\fyp\stESI_pub\inverse_problem\results\mes_debug_pythonfsav_994_\trainings\simu_sereega_srcspace_fsav_994_model_VIT_trainset_80_epochs_100_loss_cosine_norm_linear" -out_mat "D:/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/eval_real_all_out_vit_new.mat"
+
+```
+
+
+python eval.py mes_debug_python -eval_simu_type SEREEGA -root_simu "/media/pasindu/DATA/fyp/stESI_pub/simulation/fsaverage" -results_path "/media/pasindu/DATA/fyp/stESI_pub/inverse_problem/results" -subject_name fsaverage -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -eeg_snr 5 -to_load 100 -per_valid 1 -mets deepsif -leadfield_mat "/media/pasindu/DATA/fyp/stESI_pub/anatomy/leadfield_75_20k.mat" -train_run_dir "/media/pasindu/DATA/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/trainings/simu_sereega_srcspace_fsav_994_model_DEEPSIF_trainset_80_epochs_5_loss_cosine_norm_linear"
+
+
+
+python eval.py mes_debug_python -eval_simu_type SEREEGA -root_simu /media/pasindu/DATA/fyp/stESI_pub/simulation/fsaverage -results_path /media/pasindu/DATA/fyp/stESI_pub/inverse_problem/results -subject_name fsaverage -orientation constrained -electrode_montage standard_1020 -source_space fsav_994 -eeg_snr 5 -to_load 100 -per_valid 1 -mets eeg_vit -leadfield_mat /media/pasindu/DATA/fyp/stESI_pub/anatomy/leadfield_75_20k.mat -train_run_dir /media/pasindu/DATA/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/trainings/simu_SEREEGA_srcspace_fsav_994_model_VIT_trainset_80000_epochs_100_loss_cosine_norm_linear -ckpt_path eeg_vit:/media/pasindu/DATA/fyp/stESI_pub/inverse_problem/results/mes_debug_pythonfsav_994_/trainings/simu_SEREEGA_srcspace_fsav_994_model_VIT_trainset_80000_epochs_100_loss_cosine_norm_linear/pl_checkpoints/pl_checkpoints_epoch=38-train_loss=-0.12.ckpt
+
+```
