@@ -281,7 +281,7 @@ for e in range(1,args.n_examples+1) :
         #spatial
         order               = np.random.randint(args.order_min, args.order_max)
         available_sources   = np.delete(available_sources, to_remove)
-        seed                = int(np.random.choice(available_sources, 1))
+        seed                = int(np.random.choice(available_sources))
 
 
         #print(f"seed : {seed}, order : {order}")
