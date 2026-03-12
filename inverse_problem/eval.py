@@ -274,27 +274,55 @@ def _parse_ckpt_overrides(entries):
 
 
 def _strip_prefix(state_dict, prefix):
-    changed = False
+    """Return a copy of the state dict with *uniform* prefix removed."""
     new_state = {}
     for k, v in state_dict.items():
-        if k.startswith(prefix):
-            new_state[k[len(prefix) :]] = v
-            changed = True
-        else:
-            new_state[k] = v
-    return new_state if changed else None
+        if not k.startswith(prefix):
+            return None  # mixed prefixes, abort to avoid corrupting keys
+        new_state[k[len(prefix) :]] = v
+    return new_state
 
 
 def _add_prefix(state_dict, prefix):
     return {f"{prefix}{k}": v for k, v in state_dict.items()}
 
 
-def _load_module_weights(module, weights_path):
+def _load_checkpoint_state(weights_path):
     checkpoint = torch.load(weights_path, map_location=torch.device("cpu"))
     if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-        base_state = checkpoint["state_dict"]
-    else:
-        base_state = checkpoint
+        return checkpoint["state_dict"]
+    return checkpoint
+
+
+def _infer_cnn1d_arch_from_state(state_dict, source_name="<state_dict>"):
+    conv_key = next((k for k in state_dict.keys() if k.endswith("conv1.weight")), None)
+    fc_key = next((k for k in state_dict.keys() if k.endswith("fc.weight")), None)
+    if conv_key is None or fc_key is None:
+        raise ValueError(
+            f"Could not locate conv1/fc weights inside {source_name}; state dict keys={list(state_dict.keys())}"
+        )
+    conv_w = state_dict[conv_key]
+    fc_w = state_dict[fc_key]
+    if conv_w.ndim != 3:
+        raise ValueError(
+            f"Unexpected tensor shape for {conv_key} ({tuple(conv_w.shape)}); expected 3D conv weights."
+        )
+    channels = {
+        "n_electrodes": int(conv_w.shape[1]),
+        "inter_layer": int(conv_w.shape[0]),
+        "kernel_size": int(conv_w.shape[2]),
+        "n_sources": int(fc_w.shape[0]),
+    }
+    if fc_w.shape[1] != channels["inter_layer"]:
+        raise ValueError(
+            f"Inconsistent CNN1D weights in {source_name}: fc in_features={int(fc_w.shape[1])} "
+            f"!= conv out_channels={channels['inter_layer']}"
+        )
+    return channels
+
+
+def _load_module_weights(module, weights_path, state_dict=None):
+    base_state = state_dict if state_dict is not None else _load_checkpoint_state(weights_path)
 
     candidates = [base_state]
     for prefix in ("model.", "model.model."):
@@ -575,6 +603,7 @@ if "cnn_1d" in methods:
     )
     if args.train_run_dir:
         cnn_model_path = _pick_model_path_from_run_dir(args.train_run_dir, "cnn_1d")
+        cnn_model_name = os.path.basename(cnn_model_path)
     else:
         cnn_model_path = f"{train_results_path}/trained_models/{cnn1d_params['exp']}/{cnn_model_name}"
     cnn_model_path = ckpt_overrides.get("cnn_1d", cnn_model_path)
@@ -584,6 +613,26 @@ if "cnn_1d" in methods:
         sys.exit(
             f"{cnn_model_path} \nCNN model is not accessible.\nTry other parameters or train your model first."
         )
+
+    cnn_state = _load_checkpoint_state(cnn_model_path)
+    inferred_arch = _infer_cnn1d_arch_from_state(cnn_state, cnn_model_path)
+    if (inferred_arch["n_electrodes"] != n_electrodes) or (inferred_arch["n_sources"] != n_sources):
+        sys.exit(
+            (
+                "number of electrodes or sources in head model does not match the saved 1dcnn weights\n"
+                f"electrodes fwd : {n_electrodes} - electrodes weights : {inferred_arch['n_electrodes']}\n"
+                f"sources fwd : {n_sources} - sources weights : {inferred_arch['n_sources']}"
+            )
+        )
+
+    cnn1d_params.update(
+        {
+            "n_electrodes": inferred_arch["n_electrodes"],
+            "n_sources": inferred_arch["n_sources"],
+            "inter_layer": inferred_arch["inter_layer"],
+            "kernel_size": inferred_arch["kernel_size"],
+        }
+    )
 
     # from models.CNN1d_v1 import simple_1dCNN_v2 as cnn1d_net
     from models.cnn_1d import CNN1Dpl as cnn1d_net
@@ -602,7 +651,7 @@ if "cnn_1d" in methods:
         # "dropout_rate" : 0.2
     }
     cnn = cnn1d_net(**net_parameters)
-    _load_module_weights(cnn, cnn_model_path)
+    _load_module_weights(cnn, cnn_model_path, state_dict=cnn_state)
     cnn.eval()
 
 
