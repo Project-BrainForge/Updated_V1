@@ -135,9 +135,9 @@ def _iter_real_mat_paths(real_data_dir: str, pattern: str) -> List[Path]:
 def _load_real_eeg_from_mat(mat_path: str, n_times: int) -> np.ndarray:
     print("Loading EEG data from mat file: ", mat_path)
     m = loadmat(mat_path)
-    if "data" not in m:
+    if "eeg_data" not in m:
         raise KeyError(f"Missing key 'eeg_data' in {mat_path}. Keys={list(m.keys())}")
-    eeg = np.asarray(m["data"], dtype=np.float32).squeeze()
+    eeg = np.asarray(m["eeg_data"], dtype=np.float32).squeeze()
     if eeg.ndim != 2:
         raise ValueError(f"Expected eeg_data to be 2D in {mat_path}, got shape={eeg.shape}")
 
